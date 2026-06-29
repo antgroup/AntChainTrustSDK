@@ -1,0 +1,17 @@
+AntChainTrustSDK
+Copyright 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+
+This product includes software developed by
+Antchain (SHANGHAI) Digital Technology Co., Ltd.
+
+This product bundles or links the following third-party components, each
+under its respective license. See each component's LICENSE or LICENSE.txt file
+under 3rdparts/ for details.
+
+  * mbedTLS                 — Apache-2.0 (https://github.com/Mbed-TLS/mbedtls)
+  * coreMQTT                — MIT       (https://github.com/FreeRTOS/coreMQTT)
+  * coreMQTT-Agent          — MIT       (https://github.com/FreeRTOS/coreMQTT-Agent)
+  * coreJSON                — MIT       (https://github.com/FreeRTOS/coreJSON)
+  * coreSNTP                — MIT       (https://github.com/FreeRTOS/coreSNTP)
+  * backoffAlgorithm        — MIT       (https://github.com/FreeRTOS/backoffAlgorithm)
+  * Unity                   — MIT       (https://github.com/ThrowTheSwitch/Unity)

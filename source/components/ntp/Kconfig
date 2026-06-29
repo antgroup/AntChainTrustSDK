@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+config ACTRUST_NTP_SERVER
+    string "Default NTP server"
+    default "pool.ntp.org"
+    help
+        Default NTP server hostname or IP address.
+
+config ACTRUST_NTP_SYNC_PERIOD_SEC
+    int "Sync period (seconds)"
+    default 3600
+    range 15 86400
+    help
+        Interval between periodic NTP synchronisation attempts.
+        Per RFC 4330 Section 10, the poll interval SHOULD NOT be
+        less than 15 seconds. The upper limit is 86400 (24 hours).
+
+config ACTRUST_NTP_TIMEOUT_MS
+    int "Single sync timeout (ms)"
+    default 5000
+    range 1000 30000
+    help
+        Timeout for a single NTP request-response exchange, including
+        DNS resolution, UDP send, and response wait.
+
+config ACTRUST_NTP_MAX_OFFSET_MS
+    int "Maximum accepted NTP clock offset (ms)"
+    default 86400000
+    range 0 604800000
+    help
+        Maximum absolute clock offset accepted from one NTP response.
+        The default is 24 hours. Set to 0 only for deployments that
+        intentionally allow unauthenticated time bootstrap from any offset.

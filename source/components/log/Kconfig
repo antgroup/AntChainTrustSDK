@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+choice ACTRUST_LOG_LEVEL
+    prompt "Log level"
+    default ACTRUST_LOG_LEVEL_INFO
+    help
+        Select the maximum compiled log verbosity. ERROR keeps only errors;
+        WARN keeps errors and warnings; INFO keeps errors, warnings, and
+        lifecycle information; DEBUG keeps all diagnostic logs.
+
+config ACTRUST_LOG_LEVEL_ERROR
+    bool "ERROR"
+
+config ACTRUST_LOG_LEVEL_WARN
+    bool "WARN"
+
+config ACTRUST_LOG_LEVEL_INFO
+    bool "INFO"
+
+config ACTRUST_LOG_LEVEL_DEBUG
+    bool "DEBUG"
+
+endchoice
+
+config ACTRUST_LOG_LINE_LEN
+    int "Log line length"
+    default 4096
+    range 128 8192
+    help
+        Max length of the full log line (header + message).

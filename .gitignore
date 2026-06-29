@@ -1,0 +1,56 @@
+# =========================
+# Editor
+# =========================
+.vscode/
+.cursor/
+.claude/
+
+# =========================
+# Build outputs
+# =========================
+build/
+.config
+.config.old
+
+# =========================
+# Test defconfig
+# =========================
+config/test_defconfig
+
+# =========================
+# GCC/Clang artifacts
+# =========================
+*.o
+*.obj
+*.a
+*.so
+
+# =========================
+# Cross-compilation toolchain
+# =========================
+toolchain
+
+# =========================
+# Generated documentation
+# =========================
+docs/
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# =========================
+# Test PKI material
+# =========================
+tests/**/pki/*.crt
+tests/**/pki/*.crt.*
+tests/**/pki/*.der
+tests/**/pki/*.der.*
+tests/**/pki/*.key
+tests/**/pki/*.key.*
+tests/**/pki/*.csr
+tests/**/pki/*.csr.*

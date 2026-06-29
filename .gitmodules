@@ -1,0 +1,21 @@
+[submodule "3rdparts/coreMQTT"]
+	path = 3rdparts/coreMQTT
+	url = https://github.com/FreeRTOS/coreMQTT
+[submodule "3rdparts/backoffAlgorithm"]
+	path = 3rdparts/backoffAlgorithm
+	url = https://github.com/FreeRTOS/backoffAlgorithm
+[submodule "3rdparts/coreJSON"]
+	path = 3rdparts/coreJSON
+	url = https://github.com/FreeRTOS/coreJSON
+[submodule "3rdparts/coreSNTP"]
+	path = 3rdparts/coreSNTP
+	url = https://github.com/FreeRTOS/coreSNTP
+[submodule "3rdparts/mbedtls"]
+	path = 3rdparts/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls
+[submodule "3rdparts/coreMQTT-Agent"]
+	path = 3rdparts/coreMQTT-Agent
+	url = https://github.com/FreeRTOS/coreMQTT-Agent
+[submodule "3rdparts/Unity"]
+	path = 3rdparts/Unity
+	url = https://github.com/ThrowTheSwitch/Unity

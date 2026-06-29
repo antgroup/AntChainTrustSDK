@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+menu "Third-party Libraries"
+
+choice ACTRUST_3RDPARTS_CRYPTO
+    prompt "Crypto / TLS backend"
+    default ACTRUST_3RDPARTS_CRYPTO_MBEDTLS
+    help
+        Crypto and TLS primitive provider. Used by the TLS and Crypto
+        components.
+
+config ACTRUST_3RDPARTS_CRYPTO_MBEDTLS
+    bool "mbedTLS"
+
+config ACTRUST_3RDPARTS_CRYPTO_NONE
+    bool "None"
+
+endchoice
+
+choice ACTRUST_3RDPARTS_MQTT
+    prompt "MQTT library"
+    default ACTRUST_3RDPARTS_MQTT_COREMQTT
+    help
+        MQTT 3.1.1 client library. coreMQTT includes the Agent
+        extension for thread-safe access.
+
+config ACTRUST_3RDPARTS_MQTT_COREMQTT
+    bool "coreMQTT + coreMQTT-Agent"
+
+config ACTRUST_3RDPARTS_MQTT_NONE
+    bool "None"
+
+endchoice
+
+choice ACTRUST_3RDPARTS_JSON
+    prompt "JSON library"
+    default ACTRUST_3RDPARTS_JSON_COREJSON
+
+config ACTRUST_3RDPARTS_JSON_COREJSON
+    bool "coreJSON"
+
+config ACTRUST_3RDPARTS_JSON_NONE
+    bool "None"
+
+endchoice
+
+choice ACTRUST_3RDPARTS_NTP
+    prompt "NTP library"
+    default ACTRUST_3RDPARTS_NTP_CORESNTP
+
+config ACTRUST_3RDPARTS_NTP_CORESNTP
+    bool "coreSNTP"
+
+config ACTRUST_3RDPARTS_NTP_NONE
+    bool "None"
+
+endchoice
+
+choice ACTRUST_3RDPARTS_BACKOFF
+    prompt "Backoff algorithm"
+    default ACTRUST_3RDPARTS_BACKOFF_BACKOFFALGO
+
+config ACTRUST_3RDPARTS_BACKOFF_BACKOFFALGO
+    bool "backoffAlgorithm"
+
+config ACTRUST_3RDPARTS_BACKOFF_NONE
+    bool "None"
+
+endchoice
+
+endmenu

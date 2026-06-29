@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+source "source/core/Kconfig"
+source "source/components/Kconfig"
+source "source/adapter/Kconfig"

@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+choice
+    prompt "JSON backend"
+    default ACTRUST_JSON_BACKEND_COREJSON
+
+config ACTRUST_JSON_BACKEND_COREJSON
+    bool "coreJSON"
+    help
+        Use AWS coreJSON as the backend implementation.
+
+endchoice

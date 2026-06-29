@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+menu "Limits"
+
+config ACTRUST_KV_MAX_RECORDS
+    int "Max records per partition"
+    default 16
+
+config ACTRUST_KV_NAMESPACE_MAX_LEN
+    int "Max namespace length"
+    default 32
+
+config ACTRUST_KV_MAX_KEY_LEN
+    int "Max key length"
+    default 32
+
+config ACTRUST_KV_MAX_VALUE_LEN
+    int "Max value length"
+    default 4096
+
+endmenu
+
+menu "Integrity"
+
+config ACTRUST_KV_ENABLE_CRC
+    bool "CRC on value writes"
+    default y
+    help
+        Append a CRC32 checksum when writing values. Detects
+        corruption from incomplete writes or bit-flips.
+
+endmenu
+
+menuconfig ACTRUST_KV_NS_MAP
+    bool "Namespace-to-storage-ID map"
+    default y
+    help
+        Static map from namespace string to adapter storage ID.
+        When a namespace matches, the mapped storage ID is used
+        instead of the default.
+
+if ACTRUST_KV_NS_MAP
+
+config ACTRUST_KV_NS_MAP_COUNT
+    int "Active entries"
+    range 0 4
+    default 1
+
+if ACTRUST_KV_NS_MAP_COUNT > 0
+
+config ACTRUST_KV_NAMESPACE_0
+    string "Entry 0: namespace"
+    default "cloud_aws"
+
+config ACTRUST_KV_NAMESPACE_STORAGE_ID_0
+    hex "Entry 0: storage ID"
+    default 0x12345679
+
+endif
+
+if ACTRUST_KV_NS_MAP_COUNT > 1
+
+config ACTRUST_KV_NAMESPACE_1
+    string "Entry 1: namespace"
+    default ""
+
+config ACTRUST_KV_NAMESPACE_STORAGE_ID_1
+    hex "Entry 1: storage ID"
+    default 0
+
+endif
+
+if ACTRUST_KV_NS_MAP_COUNT > 2
+
+config ACTRUST_KV_NAMESPACE_2
+    string "Entry 2: namespace"
+    default ""
+
+config ACTRUST_KV_NAMESPACE_STORAGE_ID_2
+    hex "Entry 2: storage ID"
+    default 0
+
+endif
+
+if ACTRUST_KV_NS_MAP_COUNT > 3
+
+config ACTRUST_KV_NAMESPACE_3
+    string "Entry 3: namespace"
+    default ""
+
+config ACTRUST_KV_NAMESPACE_STORAGE_ID_3
+    hex "Entry 3: storage ID"
+    default 0
+
+endif
+
+endif

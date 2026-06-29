@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+menu "Message Limits"
+
+config ACTRUST_MQTT_PAYLOAD_MAX_LEN
+    int "Max payload length"
+    default 4096
+    range 1 16384
+
+endmenu
+
+menu "Connection"
+
+config ACTRUST_MQTT_KEEPALIVE_SEC
+    int "Keep-alive interval (seconds)"
+    default 60
+    range 10 3600
+
+config ACTRUST_MQTT_CONNECT_TIMEOUT_MS
+    int "Connect timeout (ms)"
+    default 10000
+    range 1000 30000
+
+endmenu

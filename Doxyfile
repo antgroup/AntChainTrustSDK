@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+# =============================================================================
+# Doxygen configuration for AntChainTrustSDK
+# =============================================================================
+# Generate API documentation from the public headers and component sources:
+#
+#   doxygen Doxyfile
+#
+# Output is written to docs/html/ (git-ignored). Only a curated set of
+# public interfaces is documented; 3rdparts/ and build artifacts are excluded.
+# =============================================================================
+
+# --- Project ---------------------------------------------------------------
+PROJECT_NAME           = "AntChainTrustSDK"
+PROJECT_NUMBER         = 1.0.0
+PROJECT_BRIEF          = "Modular IoT framework for embedded systems"
+OUTPUT_DIRECTORY       = docs
+CREATE_SUBDIRS         = NO
+
+# --- Input -----------------------------------------------------------------
+INPUT                  = include \
+                         source/core/include \
+                         source/components \
+                         source/adapter/include \
+                         examples \
+                         README.md \
+                         CONTRIBUTING.md \
+                         SECURITY.md
+USE_MDFILE_AS_MAINPAGE = README.md
+FILE_PATTERNS          = *.c *.h *.md
+RECURSIVE              = YES
+EXCLUDE_PATTERNS       = */tests/* */build/* */3rdparts/*
+
+# --- Build -----------------------------------------------------------------
+EXTRACT_ALL            = NO
+EXTRACT_STATIC         = NO
+OPTIMIZE_OUTPUT_FOR_C  = YES
+JAVADOC_AUTOBRIEF      = YES
+WARN_IF_UNDOCUMENTED   = NO
+QUIET                  = YES
+MARKDOWN_SUPPORT       = YES
+
+# --- Output ----------------------------------------------------------------
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+HTML_OUTPUT            = html
+SOURCE_BROWSER         = YES

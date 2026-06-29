@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+choice ACTRUST_CLOUD_PLATFORM
+    prompt "Cloud platform"
+    default ACTRUST_CLOUD_PLATFORM_AWS
+    help
+        Select the cloud provider implementation to build.
+    config ACTRUST_CLOUD_PLATFORM_AWS
+        bool "AWS IoT Core"
+    # Aliyun provider is not implemented yet.
+    # config ACTRUST_CLOUD_PLATFORM_ALIYUN
+    #     bool "Aliyun IoT Platform"
+endchoice
+
+config ACTRUST_CLOUD_DOWNLINK_QUEUE_SIZE
+    int "Downlink message queue size"
+    default 16
+    range 1 256
+    help
+        Size of the downlink message queue.
+
+menu "AWS IoT Core"
+    depends on ACTRUST_CLOUD_PLATFORM_AWS
+
+config ACTRUST_CLOUD_AWS_ENDPOINT
+    string "AWS IoT endpoint"
+    default ""
+    help
+        AWS IoT Core endpoint for MQTT/TLS connection, of the form
+        xxxxxxxxxxxxxx-ats.iot.<region>.amazonaws.com.  Find it in the AWS
+        IoT console under Settings -> Device data endpoint.  Required.
+
+config ACTRUST_CLOUD_AWS_PORT
+    int "AWS IoT MQTT port"
+    default 8883
+    range 1 65535
+    help
+        MQTT over TLS port of AWS IoT Core. Use 8883 for standard MQTT/TLS;
+        some deployments may use 443 with the required TLS/ALPN setup.
+
+config ACTRUST_CLOUD_AWS_TEMPLATE_NAME
+    string "Fleet provisioning template name"
+    default ""
+    help
+        Name of the AWS IoT fleet-provisioning template attached to your
+        account.  Used by RegisterThing API.
+
+config ACTRUST_CLOUD_AWS_PRODUCT_KEY
+    string "Provisioning product key"
+    default ""
+    help
+        Product key passed to provisioning template parameters.  Value is
+        defined by the template you create in AWS IoT.
+
+endmenu

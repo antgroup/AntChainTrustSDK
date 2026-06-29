@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+menu "Components"
+
+menuconfig ACTRUST_COMPONENTS_LOG
+    bool "Log"
+    default y
+    help
+        Formatted log output with compile-time level filtering.
+
+if ACTRUST_COMPONENTS_LOG
+source "source/components/log/Kconfig"
+endif
+
+menuconfig ACTRUST_COMPONENTS_QUEUE
+    bool "Queue"
+    default y
+    help
+        Thread-safe message queue built on adapter primitives.
+
+if ACTRUST_COMPONENTS_QUEUE
+source "source/components/queue/Kconfig"
+endif
+
+menuconfig ACTRUST_COMPONENTS_JSON
+    bool "JSON"
+    default y
+    help
+        JSON parser/serialiser with a component-local backend choice.
+
+if ACTRUST_COMPONENTS_JSON
+source "source/components/json/Kconfig"
+endif
+
+menuconfig ACTRUST_COMPONENTS_KV
+    bool "Key-Value Store"
+    default y
+    help
+        Persistent key-value storage with namespace isolation, backed
+        by the adapter storage interface.
+
+if ACTRUST_COMPONENTS_KV
+source "source/components/kv/Kconfig"
+endif
+
+menuconfig ACTRUST_COMPONENTS_CRYPTO
+    bool "Crypto"
+    default y
+    help
+        Cryptographic operations (hashing, ECDSA, AES) with software
+        fallback via mbedTLS and optional hardware acceleration.
+
+if ACTRUST_COMPONENTS_CRYPTO
+source "source/components/crypto/Kconfig"
+endif
+
+menuconfig ACTRUST_COMPONENTS_TLS
+    bool "TLS"
+    default y
+    help
+        TLS client built on mbedTLS. Used by MQTT and other components
+        that require encrypted transport.
+
+if ACTRUST_COMPONENTS_TLS
+source "source/components/tls/Kconfig"
+endif
+
+menuconfig ACTRUST_COMPONENTS_NTP
+    bool "NTP"
+    default y
+    help
+        Periodic time synchronisation via SNTP (RFC 4330).
+
+if ACTRUST_COMPONENTS_NTP
+source "source/components/ntp/Kconfig"
+endif
+
+menuconfig ACTRUST_COMPONENTS_MQTT
+    bool "MQTT"
+    default y
+    help
+        MQTT 3.1.1 client with automatic reconnect, subscription
+        persistence, and publish queue. Built on coreMQTT-Agent.
+
+if ACTRUST_COMPONENTS_MQTT
+source "source/components/mqtt/Kconfig"
+endif
+
+menuconfig ACTRUST_COMPONENTS_CLOUD
+    bool "Cloud"
+    default y
+    help
+        Cloud connectivity and device provisioning. Currently supports
+        AWS IoT Core fleet provisioning.
+
+if ACTRUST_COMPONENTS_CLOUD
+source "source/components/cloud/Kconfig"
+endif
+
+endmenu

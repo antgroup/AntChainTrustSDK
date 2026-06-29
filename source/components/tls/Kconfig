@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+choice ACTRUST_TLS_MIN_VERSION
+    prompt "Minimum supported TLS version"
+    default ACTRUST_TLS_MIN_VERSION_1_2
+    help
+        Select the minimum TLS protocol version accepted by the TLS client.
+
+config ACTRUST_TLS_MIN_VERSION_1_2
+    bool "TLS 1.2"
+    help
+        Allow TLS 1.2 and above (up to the backend maximum).
+
+config ACTRUST_TLS_MIN_VERSION_1_3
+    bool "TLS 1.3"
+    help
+        Require TLS 1.3 or above.
+
+endchoice

@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+menu "Core"
+
+config ACTRUST_CORE_JOB_POOL_SIZE
+    int "Job pool size"
+    default 8
+    range 2 32
+    help
+        Number of pre-allocated job objects. Each pending API call
+        (connect, publish, register, ...) occupies one slot until the
+        service task completes it.
+
+config ACTRUST_CORE_JOB_QUEUE_CAPACITY
+    int "Job queue capacity"
+    default 8
+    range 2 32
+    help
+        Maximum number of jobs that can be queued for the service task.
+        If the queue is full, actrust_*() calls return ACTRUST_ERR_QUEUE_FULL.
+
+config ACTRUST_CORE_SERVICE_STACK_SIZE
+    int "Service task stack size (bytes)"
+    default 4096
+    range 1024 65536
+    help
+        Stack size of the internal service task that drains the job
+        queue. Increase if deep call chains (TLS handshake, cloud
+        provisioning) cause stack overflows.
+
+config ACTRUST_CORE_SERVICE_PRIORITY
+    int "Service task priority"
+    default 5
+    range 1 32
+    help
+        Scheduling priority of the service task (1 = lowest).
+
+endmenu
