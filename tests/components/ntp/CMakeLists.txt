@@ -11,7 +11,10 @@
 add_executable(ntp_smoke_test "${CMAKE_CURRENT_LIST_DIR}/ntp_smoke_test.c")
 target_link_libraries(ntp_smoke_test PRIVATE unity ntp adapter)
 actrust_add_test(NAME ntp_smoke_test COMMAND ntp_smoke_test)
-set_tests_properties(ntp_smoke_test PROPERTIES LABELS "actrust;component;smoke")
+set_tests_properties(
+    ntp_smoke_test
+    PROPERTIES LABELS "actrust;component;smoke;network"
+)
 
 # -----------------------------------------------------------------------------
 # Unit Test

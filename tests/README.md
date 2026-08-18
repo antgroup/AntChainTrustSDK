@@ -64,20 +64,77 @@ Run a single test by name (after a build):
 ctest --test-dir build --output-on-failure -R queue_unit_test
 ```
 
-Run by CTest label:
+## CTest label taxonomy
 
-| Label       | What it matches                                  |
-| ----------- | ------------------------------------------------ |
-| `actrust`   | Every AntChainTrustSDK test.                     |
-| `adapter`   | `tests/adapter/*` — platform abstraction.        |
-| `component` | `tests/components/*` — protocol/utility libs.    |
-| `core`      | `tests/core/*` — public-API lifecycle.           |
-| `smoke`     | All `*_smoke_test` executables.                  |
-| `unit`      | All `*_unit_test` executables.                   |
+CTest labels have three independent dimensions. Keep all applicable labels on
+new tests so CI can select tests by code layer, test form, or environment
+requirements without maintaining a test-name list.
+
+### Code layer
+
+These labels identify which part of the SDK is under test:
+
+- `actrust` — every AntChainTrustSDK test.
+- `adapter` — platform abstraction tests.
+- `component` — protocol and utility component tests.
+- `core` — public Core API lifecycle tests.
+- `common` — shared test helper tests.
+
+### Test form
+
+These labels identify how the test is intended to run:
+
+- `unit` — fast, deterministic, host-side checks; the offline CI gate.
+- `smoke` — higher-level checks that may use local or external resources.
+
+### Environment dependency
+
+These labels identify external prerequisites, independently of code layer and
+test form:
+
+- `network` — accesses DNS or network endpoints. Current examples are
+  `network_adapter_smoke_test` and `ntp_smoke_test`.
+- `integration` — requires an external service or a real end-to-end protocol
+  path. Current examples are the AWS/PKI smoke tests.
+- `aws` — requires AWS IoT configuration or service access.
+- `pki` — requires user-supplied test certificates/private keys under
+  `tests/pki/`.
+
+`network` is not a synonym for `integration`: network and NTP tests need network
+access but do not require AWS or PKI credentials. AWS tests carry
+`integration;aws;pki` together. Do not add `external` as a catch-all label; use
+the specific environment label instead.
+
+Current selection examples:
 
 ```sh
+# C04 offline gate
 ctest --test-dir build --output-on-failure --label-regex unit
+
+# Network-dependent job
+ctest --test-dir build --output-on-failure --label-regex network
+
+# AWS/PKI integration job
+ctest --test-dir build --output-on-failure --label-regex aws
+
+# Smoke tests excluding environment-dependent tests
+ctest --test-dir build --output-on-failure \
+      --label-regex actrust --label-exclude 'network|integration'
 ```
+
+The `unit` label is the required offline baseline. The `network` and `aws`
+selections are optional jobs for environments that provide their prerequisites.
+AWS tests without credentials remain selected but use the existing configure-time
+CTest skip behavior.
+
+## Test result states
+
+`PASS` means the test completed successfully; `FAIL` means an assertion or
+unexpected error occurred; `SKIP` means a documented prerequisite was absent or
+an external resource was unavailable; `NOT RUN` means the requested test was
+not selected or was not built. A Unity `TEST_IGNORE_MESSAGE` is reported within
+its executable, while configure-time CTest skips use `SKIP_REGULAR_EXPRESSION`.
+
 
 ## PKI-gated tests
 

@@ -27,7 +27,10 @@ actrust_use_shared_pki(core_smoke_test)
 
 if(ACTRUST_TESTS_AWS_FLEET_AVAILABLE)
     actrust_add_test(NAME core_smoke_test COMMAND core_smoke_test)
-    set_tests_properties(core_smoke_test PROPERTIES LABELS "actrust;core;smoke")
+    set_tests_properties(
+        core_smoke_test
+        PROPERTIES LABELS "actrust;core;smoke;integration;aws;pki"
+    )
 else()
     message(
         STATUS
@@ -44,7 +47,9 @@ else()
     )
     set_tests_properties(
         core_smoke_test
-        PROPERTIES LABELS "actrust;core;smoke" SKIP_REGULAR_EXPRESSION "Skipped"
+        PROPERTIES
+            LABELS "actrust;core;smoke;integration;aws;pki"
+            SKIP_REGULAR_EXPRESSION "Skipped"
     )
 endif()
 

@@ -517,6 +517,7 @@ if ! validate_platform_config "$ACTIVE_PLATFORM"; then
 fi
 
 # Configure CMake
+echo ""
 log_info "Configuring CMake (BUILD_TYPE=${BUILD_TYPE})"
 CMAKE_ARGS=(
     -S "$ROOT_DIR"
@@ -581,6 +582,7 @@ if ! cmake "${CMAKE_ARGS[@]}"; then
 fi
 
 # Build the project
+echo ""
 log_info "Building project (using $JOBS parallel jobs)"
 BUILD_ARGS=(
     --build "$BUILD_DIR"
@@ -734,6 +736,7 @@ if [[ $RUN_TESTS -eq 1 ]]; then
         exit 1
     fi
 
+    echo ""
     log_info "Running tests (label: ${TEST_LABEL})"
 
     CTEST_ARGS=(
@@ -746,11 +749,25 @@ if [[ $RUN_TESTS -eq 1 ]]; then
         CTEST_ARGS+=(--verbose)
     fi
 
-    if ! ctest "${CTEST_ARGS[@]}"; then
+    CTEST_LOG="$BUILD_DIR/ctest.log"
+    if ! ctest "${CTEST_ARGS[@]}" | tee "$CTEST_LOG"; then
         log_error "Tests failed"
         exit 1
     fi
 
+    echo ""
+    log_info "Code Layer Test Report"
+    awk -v report=layer -f "$ROOT_DIR/tools/ctest_summary.awk" "$CTEST_LOG"
+
+    echo ""
+    log_info "Test Form Report"
+    awk -v report=form -f "$ROOT_DIR/tools/ctest_summary.awk" "$CTEST_LOG"
+
+    echo ""
+    log_info "Environment Dependency Report"
+    awk -v report=environment -f "$ROOT_DIR/tools/ctest_summary.awk" "$CTEST_LOG"
+
+    echo ""
     log_info "All tests passed"
 fi
 

@@ -35,7 +35,7 @@ actrust_add_test(NAME network_adapter_smoke_test COMMAND
 )
 set_tests_properties(
     network_adapter_smoke_test
-    PROPERTIES LABELS "actrust;adapter;smoke"
+    PROPERTIES LABELS "actrust;adapter;smoke;network"
 )
 
 # ---- Storage ----

@@ -32,7 +32,7 @@ if(ACTRUST_TESTS_AWS_FLEET_AVAILABLE)
     actrust_add_test(NAME cloud_smoke_test COMMAND cloud_smoke_test)
     set_tests_properties(
         cloud_smoke_test
-        PROPERTIES LABELS "actrust;component;smoke"
+        PROPERTIES LABELS "actrust;component;smoke;integration;aws;pki"
     )
 else()
     message(
@@ -51,7 +51,7 @@ else()
     set_tests_properties(
         cloud_smoke_test
         PROPERTIES
-            LABELS "actrust;component;smoke"
+            LABELS "actrust;component;smoke;integration;aws;pki"
             SKIP_REGULAR_EXPRESSION "Skipped"
     )
 endif()

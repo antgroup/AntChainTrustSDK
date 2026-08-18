@@ -32,6 +32,11 @@ set(ACTRUST_TESTS_RUNTIME_DIR
     "Path to isolated runtime state for tests"
 )
 
+# Test result labels:
+#   unit        deterministic host-only checks
+#   network     tests that access local or external network endpoints
+#   integration tests that require external services or credentials
+
 set(ACTRUST_TESTS_PKI_FILES AmazonRootCA.pem client.crt client.key)
 
 foreach(ACTRUST_TESTS_PKI_FILE IN LISTS ACTRUST_TESTS_PKI_FILES)
@@ -151,8 +156,23 @@ function(actrust_add_test)
 endfunction()
 
 # -----------------------------------------------------------------------------
-# Test subdirectories
+# Shared test helper unit test
 # -----------------------------------------------------------------------------
+add_executable(
+    actrust_test_unit_test
+    "${CMAKE_CURRENT_LIST_DIR}/common/actrust_test_unit_test.c"
+)
+target_include_directories(
+    actrust_test_unit_test
+    PRIVATE "${CMAKE_CURRENT_LIST_DIR}/common"
+)
+target_link_libraries(actrust_test_unit_test PRIVATE unity)
+actrust_add_test(NAME actrust_test_unit_test COMMAND actrust_test_unit_test)
+set_tests_properties(
+    actrust_test_unit_test
+    PROPERTIES LABELS "actrust;common;unit"
+)
+
 add_subdirectory(adapter)
 add_subdirectory(components)
 add_subdirectory(core)

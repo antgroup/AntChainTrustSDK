@@ -16,6 +16,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,7 +34,7 @@ extern "C" {
  * @param text     When true, NUL-terminate the buffer after reading.
  *
  * @return 0 on success, 1 on any error (missing file, empty read, buffer
- *         too small to hold a NUL terminator).
+ *         too small to hold a NUL terminator, or file larger than @p buf_cap).
  */
 static inline int actrust_test_load_file(const char *path, void *buf,
                                          size_t buf_cap, size_t *out_len,
@@ -43,8 +44,11 @@ static inline int actrust_test_load_file(const char *path, void *buf,
         return 1;
     }
 
+    *out_len = 0u;
+    (void) memset(buf, 0, buf_cap);
+
     size_t read_cap = text ? buf_cap - 1u : buf_cap;
-    if (text && buf_cap < 1u) {
+    if (text && read_cap == 0u) {
         return 1;
     }
 
@@ -55,9 +59,15 @@ static inline int actrust_test_load_file(const char *path, void *buf,
 
     size_t read_len = fread(buf, 1u, read_cap, file);
     int    err      = ferror(file);
+    int    extra    = EOF;
+    if (err == 0 && read_len == read_cap && read_cap > 0u) {
+        extra = fgetc(file);
+        err   = ferror(file);
+    }
     fclose(file);
 
-    if (err != 0 || read_len == 0u) {
+    if (err != 0 || read_len == 0u || extra != EOF) {
+        (void) memset(buf, 0, buf_cap);
         return 1;
     }
 
