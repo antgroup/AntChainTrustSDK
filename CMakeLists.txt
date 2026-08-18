@@ -35,6 +35,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Define project root directory for use in subdirectories
 set(ACTRUST_ROOT "${CMAKE_SOURCE_DIR}")
 
+# Record the platform identity selected by build.sh so a build directory cannot
+# silently reuse a cache created for a different toolchain.
+set(ACTRUST_BUILD_PLATFORM "" CACHE STRING "AntChainTrustSDK platform identity")
+
 # Enable testing support
 include(CTest)
 
@@ -42,17 +46,26 @@ include(CTest)
 # Load User Configuration
 # =============================================================================
 
-set(ACTRUST_CONFIG_CMAKE "${CMAKE_BINARY_DIR}/config/actrust_config.cmake")
-if(EXISTS "${ACTRUST_CONFIG_CMAKE}")
-    message(STATUS "Loading configuration from: ${ACTRUST_CONFIG_CMAKE}")
-    include("${ACTRUST_CONFIG_CMAKE}")
-else()
-    message(WARNING "Configuration file not found: ${ACTRUST_CONFIG_CMAKE}")
-    message(
-        WARNING
-        "Project may not build correctly without proper configuration"
-    )
-endif()
+set(ACTRUST_CONFIG_DIR "${CMAKE_BINARY_DIR}/config")
+set(ACTRUST_CONFIG_HEADER "${ACTRUST_CONFIG_DIR}/actrust_config.h")
+set(ACTRUST_CONFIG_CMAKE "${ACTRUST_CONFIG_DIR}/actrust_config.cmake")
+
+foreach(
+    config_file
+    IN
+    ITEMS "${ACTRUST_CONFIG_HEADER}" "${ACTRUST_CONFIG_CMAKE}"
+)
+    if(NOT EXISTS "${config_file}")
+        message(
+            FATAL_ERROR
+            "Generated configuration file not found: ${config_file}\n"
+            "Run ./build.sh <platform> before configuring CMake directly."
+        )
+    endif()
+endforeach()
+
+message(STATUS "Loading configuration from: ${ACTRUST_CONFIG_CMAKE}")
+include("${ACTRUST_CONFIG_CMAKE}")
 
 # =============================================================================
 # Subdirectories
