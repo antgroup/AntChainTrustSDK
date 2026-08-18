@@ -55,14 +55,41 @@ set(TOOLCHAIN_DIR "${ACTRUST_TOOLCHAIN_PATH}")
 set(TOOLCHAIN_PREFIX "arm-openwrt-linux-muslgnueabi-")
 set(TOOLCHAIN_SYSROOT "${TOOLCHAIN_DIR}/sysroots-target-arm")
 
+if(NOT IS_DIRECTORY "${TOOLCHAIN_DIR}")
+    message(
+        FATAL_ERROR
+        "SIMCom toolchain root is not a directory: ${TOOLCHAIN_DIR}\n"
+        "Set ACTRUST_TOOLCHAIN_PATH to the OpenWrt toolchain root."
+    )
+endif()
+
+if(NOT IS_DIRECTORY "${TOOLCHAIN_SYSROOT}")
+    message(
+        FATAL_ERROR
+        "SIMCom toolchain sysroot not found: ${TOOLCHAIN_SYSROOT}\n"
+        "Set ACTRUST_TOOLCHAIN_PATH to a complete OpenWrt toolchain root."
+    )
+endif()
+
 if(NOT EXISTS "${TOOLCHAIN_DIR}/bin/${TOOLCHAIN_PREFIX}gcc")
     message(
         FATAL_ERROR
-        "ARM cross-compiler not found: ${TOOLCHAIN_DIR}/bin/${TOOLCHAIN_PREFIX}gcc\n"
-        "Set ACTRUST_TOOLCHAIN_PATH (env or -D) to the root of the OpenWrt toolchain "
-        "(the directory containing bin/${TOOLCHAIN_PREFIX}gcc)."
+        "SIMCom cross-compiler not found: "
+        "${TOOLCHAIN_DIR}/bin/${TOOLCHAIN_PREFIX}gcc\n"
+        "Set ACTRUST_TOOLCHAIN_PATH to a complete OpenWrt toolchain root."
     )
 endif()
+
+foreach(sysroot_dir IN ITEMS usr/include usr/lib)
+    if(NOT IS_DIRECTORY "${TOOLCHAIN_SYSROOT}/${sysroot_dir}")
+        message(
+            FATAL_ERROR
+            "SIMCom toolchain sysroot directory is missing: "
+            "${TOOLCHAIN_SYSROOT}/${sysroot_dir}\n"
+            "Set ACTRUST_TOOLCHAIN_PATH to a complete OpenWrt toolchain root."
+        )
+    endif()
+endforeach()
 
 # -----------------------------------------------------------------------------
 # Cross-compilers

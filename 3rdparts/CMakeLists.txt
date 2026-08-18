@@ -8,10 +8,26 @@
 # third-party components are conditionally included based on configuration.
 # =============================================================================
 
+function(actrust_require_submodule name path entry)
+    if(NOT IS_DIRECTORY "${path}" OR NOT EXISTS "${path}/${entry}")
+        message(
+            FATAL_ERROR
+            "AntChainTrustSDK submodule '${name}' is not initialized: ${path}\n"
+            "Expected entry point: ${path}/${entry}\n"
+            "Run: git submodule update --init --recursive"
+        )
+    endif()
+endfunction()
+
 # -----------------------------------------------------------------------------
 # Backoff Algorithm
 # -----------------------------------------------------------------------------
 if(CONFIG_ACTRUST_3RDPARTS_BACKOFF_BACKOFFALGO)
+    actrust_require_submodule(
+        "backoffAlgorithm"
+        "${CMAKE_CURRENT_LIST_DIR}/backoffAlgorithm"
+        CMakeLists.txt
+    )
     message(STATUS "AntChainTrustSDK: Including backoffAlgorithm library")
     add_subdirectory(backoffAlgorithm)
 endif()
@@ -20,6 +36,11 @@ endif()
 # JSON Parser (coreJSON)
 # -----------------------------------------------------------------------------
 if(CONFIG_ACTRUST_3RDPARTS_JSON_COREJSON)
+    actrust_require_submodule(
+        "coreJSON"
+        "${CMAKE_CURRENT_LIST_DIR}/coreJSON"
+        CMakeLists.txt
+    )
     message(STATUS "AntChainTrustSDK: Including coreJSON library")
     add_subdirectory(coreJSON)
 endif()
@@ -28,6 +49,11 @@ endif()
 # SNTP Client (coreSNTP)
 # -----------------------------------------------------------------------------
 if(CONFIG_ACTRUST_3RDPARTS_NTP_CORESNTP)
+    actrust_require_submodule(
+        "coreSNTP"
+        "${CMAKE_CURRENT_LIST_DIR}/coreSNTP"
+        CMakeLists.txt
+    )
     message(STATUS "AntChainTrustSDK: Including coreSNTP library")
     add_subdirectory(coreSNTP)
 endif()
@@ -36,6 +62,11 @@ endif()
 # Cryptography Library (Mbed TLS)
 # -----------------------------------------------------------------------------
 if(CONFIG_ACTRUST_3RDPARTS_CRYPTO_MBEDTLS)
+    actrust_require_submodule(
+        "mbedTLS"
+        "${CMAKE_CURRENT_LIST_DIR}/mbedtls"
+        CMakeLists.txt
+    )
     message(STATUS "AntChainTrustSDK: Including mbedTLS library")
     # Disable Mbed TLS tests and programs to reduce build time
     set(ENABLE_TESTING
@@ -51,6 +82,16 @@ endif()
 # MQTT Client (coreMQTT)
 # -----------------------------------------------------------------------------
 if(CONFIG_ACTRUST_3RDPARTS_MQTT_COREMQTT)
+    actrust_require_submodule(
+        "coreMQTT"
+        "${CMAKE_CURRENT_LIST_DIR}/coreMQTT"
+        mqttFilePaths.cmake
+    )
+    actrust_require_submodule(
+        "coreMQTT-Agent"
+        "${CMAKE_CURRENT_LIST_DIR}/coreMQTT-Agent"
+        mqttAgentFilePaths.cmake
+    )
     message(STATUS "AntChainTrustSDK: Including coreMQTT library")
 
     # Include MQTT source file paths
@@ -64,11 +105,6 @@ if(CONFIG_ACTRUST_3RDPARTS_MQTT_COREMQTT)
 
     # Configure to use default config
     target_compile_definitions(core_mqtt PUBLIC MQTT_DO_NOT_USE_CUSTOM_CONFIG)
-
-# -----------------------------------------------------------------------------
-# MQTT Agent (coreMQTT-Agent)
-# -----------------------------------------------------------------------------
-    message(STATUS "AntChainTrustSDK: Including coreMQTT-Agent library")
 
     # Include MQTT Agent source file paths
     include(${CMAKE_CURRENT_LIST_DIR}/coreMQTT-Agent/mqttAgentFilePaths.cmake)
@@ -90,6 +126,11 @@ endif()
 # Unity (test framework)
 # -----------------------------------------------------------------------------
 if(BUILD_TESTING)
+    actrust_require_submodule(
+        "Unity"
+        "${CMAKE_CURRENT_LIST_DIR}/Unity"
+        CMakeLists.txt
+    )
     message(STATUS "AntChainTrustSDK: Including Unity test framework")
     add_subdirectory(Unity)
 endif()
