@@ -190,6 +190,10 @@ static void mqtt_unlock(actrust_mqtt_t mqtt)
 
 static void mqtt_set_state(actrust_mqtt_t mqtt, actrust_mqtt_state_t state)
 {
+    if (mqtt == NULL) {
+        return;
+    }
+
     mqtt_lock(mqtt);
     mqtt->state = state;
     mqtt_unlock(mqtt);
