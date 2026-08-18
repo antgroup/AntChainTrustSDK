@@ -127,6 +127,28 @@ selections are optional jobs for environments that provide their prerequisites.
 AWS tests without credentials remain selected but use the existing configure-time
 CTest skip behavior.
 
+## CI quality gates
+
+The Linux quality workflow uses the same labels instead of maintaining a list of
+test executable names:
+
+- Debug and Release jobs build all tests, then run `unit` and the `actrust`
+  selection excluding `network|integration`.
+- The ASan/UBSan job runs the `unit` selection on an instrumented Debug build.
+  Host smoke tests are kept in the regular Debug/Release jobs until their task
+  lifecycles are sanitizer-clean; this boundary is reported explicitly rather
+  than disabling leak detection.
+- `network` tests are not run unless a controlled network environment is
+  provided.
+- `aws`/`integration` tests are not run unless an explicit CI credential and PKI
+  contract is provided. Missing AWS secrets do not block the baseline workflow.
+- TSan remains `NOT RUN` until deterministic concurrency coverage is available;
+  ASan/UBSan results must not be presented as TSan coverage.
+
+The workflow summary reports these conditional groups as `NOT RUN`. A test that
+is selected but detects a missing runtime prerequisite may instead report
+`SKIP`; see the result-state definitions below.
+
 ## Test result states
 
 `PASS` means the test completed successfully; `FAIL` means an assertion or

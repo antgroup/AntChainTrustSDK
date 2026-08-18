@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Linux Quality
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  format-and-doxygen:
+    name: Format and Doxygen
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install quality tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang-format doxygen python3-venv shfmt
+          python3 -m venv "${RUNNER_TEMP}/quality-tools"
+          "${RUNNER_TEMP}/quality-tools/bin/pip" install gersemi
+          echo "${RUNNER_TEMP}/quality-tools/bin" >> "${GITHUB_PATH}"
+
+      - name: Check formatting
+        run: tools/format.sh --check
+
+      - name: Build API documentation
+        run: |
+          doxygen Doxyfile
+          test -f docs/html/index.html
+
+      - name: Record conditional test status
+        run: |
+          {
+            echo "### Conditional test status"
+            echo ""
+            echo "- Network tests: NOT RUN (no controlled network environment)"
+            echo "- AWS/PKI integration tests: NOT RUN (no CI credential contract)"
+            echo "- Sanitized host smoke tests: NOT RUN (task lifecycle leaks are tracked separately)"
+            echo "- TSan: NOT RUN (concurrency coverage is not established yet)"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  linux-build:
+    name: Linux ${{ matrix.build_type }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type:
+          - Debug
+          - Release
+    env:
+      BUILD_TYPE: ${{ matrix.build_type }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure build environment
+        run: echo "BUILD_DIR=${RUNNER_TEMP}/actrust-${BUILD_TYPE}" >> "${GITHUB_ENV}"
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential cmake
+
+      - name: Build tests
+        run: ./build.sh linux_x86 --clean-build --build-tests
+
+      - name: Run offline unit tests
+        run: |
+          ctest --test-dir "${BUILD_DIR}" \
+            --output-on-failure \
+            --label-regex unit
+
+      - name: Run host-only test suite
+        run: |
+          ctest --test-dir "${BUILD_DIR}" \
+            --output-on-failure \
+            --label-regex actrust \
+            --label-exclude 'network|integration'
+
+  sanitizers:
+    name: ASan and UBSan
+    runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      BUILD_TYPE: Debug
+      CFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all
+      LDFLAGS: -fsanitize=address,undefined
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure build environment
+        run: echo "BUILD_DIR=${RUNNER_TEMP}/actrust-sanitizers" >> "${GITHUB_ENV}"
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential cmake
+
+      - name: Build instrumented tests
+        run: ./build.sh linux_x86 --clean-build --build-tests
+
+      - name: Run instrumented unit tests
+        run: |
+          ctest --test-dir "${BUILD_DIR}" \
+            --output-on-failure \
+            --label-regex unit
