@@ -60,7 +60,11 @@ actrust_err_t actrust_queue_destroy(actrust_queue_t *queue);
  *                         - @c UINT32_MAX: blocks indefinitely.
  *
  * @return @c ACTRUST_OK on success.
- * @return @c ACTRUST_ERR_QUEUE_FULL if no empty slot is acquired.
+ * @return @c ACTRUST_ERR_QUEUE_FULL if a non-blocking wait finds no empty
+ *         slot.
+ * @return @c ACTRUST_ERR_TIMEOUT if the timed wait expires.
+ * @return The underlying adapter synchronization error for other wait or
+ *         semaphore failures.
  * @return @c ACTRUST_ERR_INVALID_ARG for invalid arguments.
  */
 actrust_err_t actrust_queue_push(actrust_queue_t queue, const void *item,
@@ -76,7 +80,10 @@ actrust_err_t actrust_queue_push(actrust_queue_t queue, const void *item,
  *                          - @c UINT32_MAX: blocks indefinitely.
  *
  * @return @c ACTRUST_OK on success.
- * @return @c ACTRUST_ERR_NO_RESOURCE if no item is acquired.
+ * @return @c ACTRUST_ERR_NO_RESOURCE if a non-blocking wait finds no item.
+ * @return @c ACTRUST_ERR_TIMEOUT if the timed wait expires.
+ * @return The underlying adapter synchronization error for other wait or
+ *         semaphore failures.
  * @return @c ACTRUST_ERR_INVALID_ARG for invalid arguments.
  */
 actrust_err_t actrust_queue_pop(actrust_queue_t queue, void *out_item,

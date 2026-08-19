@@ -253,8 +253,18 @@ actrust_err_t actrust_job_queue_enqueue(actrust_job_queue_t *q,
     }
 
     if (q->count >= q->depth) {
-        (void) actrust_mutex_unlock(q->lock);
+        actrust_err_t unlock_err = actrust_mutex_unlock(q->lock);
+        if (ACTRUST_IS_ERR(unlock_err)) {
+            return unlock_err;
+        }
         return CORE_ERR(ACTRUST_ERR_QUEUE_FULL);
+    }
+
+    /* Publish before commit so a post failure cannot enqueue a dangling job. */
+    err = actrust_sem_post(q->sem_items);
+    if (ACTRUST_IS_ERR(err)) {
+        (void) actrust_mutex_unlock(q->lock);
+        return err;
     }
 
     q->buf[q->tail] = job;
@@ -262,8 +272,6 @@ actrust_err_t actrust_job_queue_enqueue(actrust_job_queue_t *q,
     q->count++;
 
     (void) actrust_mutex_unlock(q->lock);
-    (void) actrust_sem_post(q->sem_items);
-
     return ACTRUST_OK;
 }
 
@@ -287,8 +295,11 @@ actrust_err_t actrust_job_queue_dequeue(actrust_job_queue_t *q,
     }
 
     if (q->count == 0) {
-        (void) actrust_mutex_unlock(q->lock);
-        *out_job = NULL;
+        *out_job                 = NULL;
+        actrust_err_t unlock_err = actrust_mutex_unlock(q->lock);
+        if (ACTRUST_IS_ERR(unlock_err)) {
+            return unlock_err;
+        }
         return CORE_ERR(ACTRUST_ERR_NO_RESOURCE);
     }
 
@@ -296,6 +307,5 @@ actrust_err_t actrust_job_queue_dequeue(actrust_job_queue_t *q,
     q->head  = (q->head + 1) % q->depth;
     q->count--;
 
-    (void) actrust_mutex_unlock(q->lock);
-    return ACTRUST_OK;
+    return actrust_mutex_unlock(q->lock);
 }

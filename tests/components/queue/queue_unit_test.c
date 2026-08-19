@@ -12,6 +12,8 @@
 /* Queue */
 #include "queue/queue.h"
 
+#define TEST_TIMEOUT_MS 50u
+
 static actrust_queue_t queue;
 
 void setUp(void)
@@ -113,6 +115,19 @@ void test_pop_empty_nonblocking(void)
                       ACTRUST_ERR_NO_RESOURCE);
 }
 
+void test_pop_empty_timeout(void)
+{
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_queue_create(&queue, 4u, sizeof(int)));
+
+    int           out    = 0;
+    actrust_err_t err    = actrust_queue_pop(queue, &out, TEST_TIMEOUT_MS);
+    uint16_t      module = ACTRUST_ERR_MODULE(err);
+
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_MODULE_ADAPTER_SYSTEM, module);
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_TIMEOUT, ACTRUST_ERR_CODE(err));
+}
+
 void test_push_full_nonblocking(void)
 {
     TEST_ASSERT_EQUAL(ACTRUST_OK,
@@ -121,6 +136,21 @@ void test_push_full_nonblocking(void)
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_push(queue, &v, 0u));
     TEST_ASSERT_EQUAL(ACTRUST_ERR_CODE(actrust_queue_push(queue, &v, 0u)),
                       ACTRUST_ERR_QUEUE_FULL);
+}
+
+void test_push_full_timeout(void)
+{
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_queue_create(&queue, 1u, sizeof(int)));
+
+    int v = 42;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_push(queue, &v, 0u));
+
+    actrust_err_t err    = actrust_queue_push(queue, &v, TEST_TIMEOUT_MS);
+    uint16_t      module = ACTRUST_ERR_MODULE(err);
+
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_MODULE_ADAPTER_SYSTEM, module);
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_TIMEOUT, ACTRUST_ERR_CODE(err));
 }
 
 void test_fifo_order(void)
@@ -223,7 +253,9 @@ int main(void)
     RUN_TEST(test_pop_null_queue);
     RUN_TEST(test_pop_null_item);
     RUN_TEST(test_pop_empty_nonblocking);
+    RUN_TEST(test_pop_empty_timeout);
     RUN_TEST(test_push_full_nonblocking);
+    RUN_TEST(test_push_full_timeout);
     RUN_TEST(test_fifo_order);
     RUN_TEST(test_wraparound);
     RUN_TEST(test_size_tracks_push_pop);

@@ -135,12 +135,24 @@ actrust_err_t actrust_queue_push(actrust_queue_t queue, const void *item,
 
     actrust_err_t err = actrust_sem_wait(queue->empty_slots, timeout_ms);
     if (err != ACTRUST_OK) {
-        return QUEUE_ERR(ACTRUST_ERR_QUEUE_FULL);
+        if (ACTRUST_ERR_MODULE(err) == ACTRUST_ERR_MODULE_ADAPTER_SYSTEM &&
+            ACTRUST_ERR_CODE(err) == ACTRUST_ERR_WOULD_BLOCK) {
+            return QUEUE_ERR(ACTRUST_ERR_QUEUE_FULL);
+        }
+        return err;
     }
 
     err = actrust_mutex_lock(queue->lock);
     if (err != ACTRUST_OK) {
         (void) actrust_sem_post(queue->empty_slots);
+        return err;
+    }
+
+    /* Publish while holding the lock so post failure remains rollback-safe. */
+    err = actrust_sem_post(queue->filled_slots);
+    if (err != ACTRUST_OK) {
+        (void) actrust_sem_post(queue->empty_slots);
+        (void) actrust_mutex_unlock(queue->lock);
         return err;
     }
 
@@ -150,8 +162,6 @@ actrust_err_t actrust_queue_push(actrust_queue_t queue, const void *item,
     queue->size++;
 
     (void) actrust_mutex_unlock(queue->lock);
-    (void) actrust_sem_post(queue->filled_slots);
-
     return ACTRUST_OK;
 }
 
@@ -164,12 +174,25 @@ actrust_err_t actrust_queue_pop(actrust_queue_t queue, void *out_item,
 
     actrust_err_t err = actrust_sem_wait(queue->filled_slots, timeout_ms);
     if (err != ACTRUST_OK) {
-        return QUEUE_ERR(ACTRUST_ERR_NO_RESOURCE);
+        if (ACTRUST_ERR_MODULE(err) == ACTRUST_ERR_MODULE_ADAPTER_SYSTEM &&
+            ACTRUST_ERR_CODE(err) == ACTRUST_ERR_WOULD_BLOCK) {
+            return QUEUE_ERR(ACTRUST_ERR_NO_RESOURCE);
+        }
+        return err;
     }
 
     err = actrust_mutex_lock(queue->lock);
     if (err != ACTRUST_OK) {
         (void) actrust_sem_post(queue->filled_slots);
+        return err;
+    }
+
+    /* Reserve capacity while holding the lock so post failure is recoverable.
+     */
+    err = actrust_sem_post(queue->empty_slots);
+    if (err != ACTRUST_OK) {
+        (void) actrust_sem_post(queue->filled_slots);
+        (void) actrust_mutex_unlock(queue->lock);
         return err;
     }
 
@@ -179,8 +202,6 @@ actrust_err_t actrust_queue_pop(actrust_queue_t queue, void *out_item,
     queue->size--;
 
     (void) actrust_mutex_unlock(queue->lock);
-    (void) actrust_sem_post(queue->empty_slots);
-
     return ACTRUST_OK;
 }
 
@@ -197,7 +218,5 @@ actrust_err_t actrust_queue_size(actrust_queue_t queue, size_t *out_size)
 
     *out_size = queue->size;
 
-    (void) actrust_mutex_unlock(queue->lock);
-
-    return ACTRUST_OK;
+    return actrust_mutex_unlock(queue->lock);
 }

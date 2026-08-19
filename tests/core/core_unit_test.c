@@ -18,6 +18,8 @@
 /* Adapter */
 #include "adapter/system.h"
 
+#define TEST_JOB_QUEUE_TIMEOUT_MS 50u
+
 static actrust_err_t        s_last_result;
 static actrust_core_state_t s_last_state;
 static int                  s_cb_count;
@@ -132,6 +134,35 @@ void test_publish_rejects_embedded_nul_payload(void)
     TEST_ASSERT_EQUAL(ACTRUST_ERR_INVALID_ARG, ACTRUST_ERR_CODE(err));
 }
 
+void test_job_queue_dequeue_nonblocking_preserves_would_block(void)
+{
+    actrust_job_queue_t q       = { 0 };
+    actrust_job_t      *out_job = NULL;
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_init(&q, 1u));
+
+    actrust_err_t err = actrust_job_queue_dequeue(&q, 0u, &out_job);
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_MODULE_ADAPTER_SYSTEM,
+                      ACTRUST_ERR_MODULE(err));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_WOULD_BLOCK, ACTRUST_ERR_CODE(err));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_deinit(&q));
+}
+
+void test_job_queue_dequeue_preserves_timeout(void)
+{
+    actrust_job_queue_t q       = { 0 };
+    actrust_job_t      *out_job = NULL;
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_init(&q, 1u));
+
+    actrust_err_t err =
+        actrust_job_queue_dequeue(&q, TEST_JOB_QUEUE_TIMEOUT_MS, &out_job);
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_MODULE_ADAPTER_SYSTEM,
+                      ACTRUST_ERR_MODULE(err));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_TIMEOUT, ACTRUST_ERR_CODE(err));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_deinit(&q));
+}
+
 void test_job_queue_dequeue_restores_item_token_on_lock_failure(void)
 {
     actrust_job_queue_t q       = { 0 };
@@ -228,6 +259,8 @@ int main(void)
     RUN_TEST(test_connect_without_init);
     RUN_TEST(test_publish_without_init);
     RUN_TEST(test_publish_rejects_embedded_nul_payload);
+    RUN_TEST(test_job_queue_dequeue_nonblocking_preserves_would_block);
+    RUN_TEST(test_job_queue_dequeue_preserves_timeout);
     RUN_TEST(test_job_queue_dequeue_restores_item_token_on_lock_failure);
     RUN_TEST(test_init_rejects_oversized_claim_lengths);
     RUN_TEST(test_deinit_recovers_after_async_init_failure);

@@ -145,6 +145,8 @@ actrust_err_t actrust_job_queue_deinit(actrust_job_queue_t *q);
  * and completed by the service.
  *
  * @return @c ACTRUST_OK or @c ACTRUST_ERR_QUEUE_FULL.
+ * @return The underlying adapter synchronization error if locking or
+ *         publishing the item token fails.
  */
 actrust_err_t actrust_job_queue_enqueue(actrust_job_queue_t *q,
                                         actrust_job_t       *job);
@@ -156,7 +158,11 @@ actrust_err_t actrust_job_queue_enqueue(actrust_job_queue_t *q,
  * @param[in]  timeout_ms Timeout for the blocking wait.
  * @param[out] out_job    Receives the dequeued job.
  *
- * @return @c ACTRUST_OK or @c ACTRUST_ERR_TIMEOUT.
+ * @return @c ACTRUST_OK on success.
+ * @return @c ACTRUST_ERR_WOULD_BLOCK for an empty non-blocking dequeue.
+ * @return @c ACTRUST_ERR_TIMEOUT if the timed wait expires.
+ * @return The underlying adapter synchronization error for other wait, lock,
+ *         or compensation failures.
  */
 actrust_err_t actrust_job_queue_dequeue(actrust_job_queue_t *q,
                                         uint32_t             timeout_ms,
