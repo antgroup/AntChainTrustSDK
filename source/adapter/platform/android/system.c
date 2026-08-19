@@ -30,6 +30,28 @@
 /* Adapter */
 #include "adapter/system.h"
 
+static pthread_mutex_t g_lifecycle_gate = PTHREAD_MUTEX_INITIALIZER;
+
+/* ========================================================================
+ * Lifecycle Gate Implementation
+ * ======================================================================== */
+
+actrust_err_t actrust_lifecycle_lock(void)
+{
+    return (pthread_mutex_lock(&g_lifecycle_gate) == 0)
+               ? ACTRUST_OK
+               : ACTRUST_ERR(ACTRUST_ERR_MODULE_ADAPTER_SYSTEM,
+                             ACTRUST_ERR_HW_FAILURE);
+}
+
+actrust_err_t actrust_lifecycle_unlock(void)
+{
+    return (pthread_mutex_unlock(&g_lifecycle_gate) == 0)
+               ? ACTRUST_OK
+               : ACTRUST_ERR(ACTRUST_ERR_MODULE_ADAPTER_SYSTEM,
+                             ACTRUST_ERR_HW_FAILURE);
+}
+
 /* ========================================================================
  * Memory Allocation Implementation
  * ======================================================================== */
