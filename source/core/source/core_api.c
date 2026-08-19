@@ -149,6 +149,43 @@ static actrust_err_t core_post_job(const core_job_submit_t *submit)
     return ACTRUST_OK;
 }
 
+static actrust_err_t core_submit_job(const core_job_submit_t *submit,
+                                     actrust_core_state_t     required_state,
+                                     bool allow_registered_state)
+{
+    actrust_err_t err = actrust_lifecycle_lock();
+    if (ACTRUST_IS_ERR(err)) {
+        return err;
+    }
+
+    actrust_core_ctx_t *ctx = core_get_ctx();
+    if (ctx->lock == NULL || ctx->deinit_pending) {
+        (void) actrust_lifecycle_unlock();
+        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+
+    err = actrust_mutex_lock(ctx->lock);
+    if (ACTRUST_IS_ERR(err)) {
+        (void) actrust_lifecycle_unlock();
+        return err;
+    }
+
+    bool valid = ctx->state == required_state;
+    if (allow_registered_state) {
+        valid = valid || ctx->state == ACTRUST_CORE_REGISTERED;
+    }
+
+    if (!valid) {
+        err = CORE_ERR(ACTRUST_ERR_BAD_STATE);
+    } else {
+        err = core_post_job(submit);
+    }
+
+    (void) actrust_mutex_unlock(ctx->lock);
+    (void) actrust_lifecycle_unlock();
+    return err;
+}
+
 /* ========================================================================
  * Callback registration
  * ======================================================================== */
@@ -159,9 +196,19 @@ actrust_err_t actrust_set_callback(actrust_callback_t cb, void *user_data)
         return CORE_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    core_set_callback(
-        (actrust_callback_ctx_t){ .fn = cb, .user_data = user_data });
+    actrust_err_t err = actrust_lifecycle_lock();
+    if (ACTRUST_IS_ERR(err)) {
+        return err;
+    }
 
+    actrust_core_ctx_t *ctx = core_get_ctx();
+    if (ctx->lock != NULL || ctx->state != ACTRUST_CORE_UNINIT) {
+        (void) actrust_lifecycle_unlock();
+        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+
+    ctx->cb = (actrust_callback_ctx_t){ .fn = cb, .user_data = user_data };
+    (void) actrust_lifecycle_unlock();
     return ACTRUST_OK;
 }
 
@@ -171,22 +218,27 @@ actrust_err_t actrust_set_callback(actrust_callback_t cb, void *user_data)
 
 actrust_err_t actrust_init(const actrust_config_t *config)
 {
-    (void) actrust_log_init();
-    LOG_INFO("core init requested");
-
-    actrust_core_ctx_t *ctx = core_get_ctx();
-
-    if (core_get_state() != ACTRUST_CORE_UNINIT) {
-        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
+    actrust_err_t err = actrust_lifecycle_lock();
+    if (ACTRUST_IS_ERR(err)) {
+        return err;
     }
 
+    actrust_core_ctx_t *ctx = core_get_ctx();
+    if (ctx->lock != NULL || ctx->state != ACTRUST_CORE_UNINIT) {
+        (void) actrust_lifecycle_unlock();
+        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
+    }
     if (ctx->cb.fn == NULL) {
+        (void) actrust_lifecycle_unlock();
         return CORE_ERR(ACTRUST_ERR_NOT_READY);
     }
 
-    actrust_err_t err = actrust_mutex_create(&ctx->lock);
+    (void) actrust_log_init();
+    LOG_INFO("core init requested");
+
+    err = actrust_mutex_create(&ctx->lock);
     if (ACTRUST_IS_ERR(err)) {
-        return err;
+        goto fail_gate;
     }
 
     err = actrust_job_pool_init(&ctx->job_pool);
@@ -200,10 +252,8 @@ actrust_err_t actrust_init(const actrust_config_t *config)
         goto fail_pool;
     }
 
-    core_set_state(ACTRUST_CORE_INITING);
+    ctx->state = ACTRUST_CORE_INITING;
 
-    /* core_post_job allocates a job and enqueues it; on failure it releases
-     * the job back to the pool itself, so no extra cleanup is required here. */
     core_job_submit_t submit = {
         .type               = ACTRUST_JOB_INIT,
         .params.init.config = config,
@@ -220,23 +270,27 @@ actrust_err_t actrust_init(const actrust_config_t *config)
         goto fail_service;
     }
 
+    (void) actrust_lifecycle_unlock();
     LOG_INFO("core service started");
     return ACTRUST_OK;
 
 fail_service: {
     actrust_job_t *job = NULL;
-    while (ACTRUST_IS_OK(actrust_job_queue_dequeue(&ctx->job_queue, 0, &job))) {
+    while (
+        ACTRUST_IS_OK(actrust_job_queue_dequeue(&ctx->job_queue, 0u, &job))) {
         (void) actrust_job_release(&ctx->job_pool, job);
     }
 }
 fail_queue:
-    core_set_state(ACTRUST_CORE_UNINIT);
+    ctx->state = ACTRUST_CORE_UNINIT;
     (void) actrust_job_queue_deinit(&ctx->job_queue);
 fail_pool:
     (void) actrust_job_pool_deinit(&ctx->job_pool);
 fail_lock:
     (void) actrust_mutex_destroy(ctx->lock);
     ctx->lock = NULL;
+fail_gate:
+    (void) actrust_lifecycle_unlock();
     return err;
 }
 
@@ -244,43 +298,62 @@ actrust_err_t actrust_deinit(void)
 {
     LOG_INFO("core deinit requested");
 
-    actrust_core_ctx_t *ctx = core_get_ctx();
+    actrust_err_t err = actrust_lifecycle_lock();
+    if (ACTRUST_IS_ERR(err)) {
+        return err;
+    }
 
-    /* Atomically claim the deinit slot. Concurrent callers fail here, so we
-     * cannot end up running cleanup twice on the same ctx. */
-    if (!core_try_acquire_deinit()) {
+    actrust_core_ctx_t *ctx = core_get_ctx();
+    if (ctx->lock == NULL || ctx->deinit_pending ||
+        (ctx->state != ACTRUST_CORE_READY &&
+         ctx->state != ACTRUST_CORE_INIT_FAILED)) {
+        (void) actrust_lifecycle_unlock();
         return CORE_ERR(ACTRUST_ERR_BAD_STATE);
     }
+
+    err = actrust_mutex_lock(ctx->lock);
+    if (ACTRUST_IS_ERR(err)) {
+        (void) actrust_lifecycle_unlock();
+        return err;
+    }
+
+    ctx->deinit_pending = true;
 
     core_job_submit_t submit = {
         .type = ACTRUST_JOB_DEINIT,
     };
 
-    actrust_err_t err = core_post_job(&submit);
+    err = core_post_job(&submit);
     if (ACTRUST_IS_ERR(err)) {
-        core_lock();
         ctx->deinit_pending = false;
-        core_unlock();
+        (void) actrust_mutex_unlock(ctx->lock);
+        (void) actrust_lifecycle_unlock();
         return err;
     }
 
+    (void) actrust_mutex_unlock(ctx->lock);
+    (void) actrust_lifecycle_unlock();
+
     (void) core_service_stop();
 
+    err = actrust_lifecycle_lock();
+    if (ACTRUST_IS_ERR(err)) {
+        return err;
+    }
+
     actrust_job_t *job = NULL;
-    /* Drain any remaining jobs from the queue and release them back to the
-     * pool. */
-    while (ACTRUST_IS_OK(actrust_job_queue_dequeue(&ctx->job_queue, 0, &job))) {
+    while (
+        ACTRUST_IS_OK(actrust_job_queue_dequeue(&ctx->job_queue, 0u, &job))) {
         (void) actrust_job_release(&ctx->job_pool, job);
     }
 
     (void) actrust_job_queue_deinit(&ctx->job_queue);
     (void) actrust_job_pool_deinit(&ctx->job_pool);
-    core_lock();
-    ctx->deinit_pending = false;
-    core_unlock();
-    core_set_state(ACTRUST_CORE_UNINIT);
     (void) actrust_mutex_destroy(ctx->lock);
-    ctx->lock = NULL;
+    ctx->lock           = NULL;
+    ctx->state          = ACTRUST_CORE_UNINIT;
+    ctx->deinit_pending = false;
+    (void) actrust_lifecycle_unlock();
 
     LOG_INFO("core deinitialized");
     return ACTRUST_OK;
@@ -288,56 +361,35 @@ actrust_err_t actrust_deinit(void)
 
 actrust_err_t actrust_connect(void)
 {
-    actrust_core_state_t state = core_get_state();
-    if (state != ACTRUST_CORE_READY) {
-        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
-    }
-
     core_job_submit_t submit = {
         .type = ACTRUST_JOB_CONNECT,
     };
 
-    return core_post_job(&submit);
+    return core_submit_job(&submit, ACTRUST_CORE_READY, false);
 }
 
 actrust_err_t actrust_disconnect(void)
 {
-    actrust_core_state_t state = core_get_state();
-    if (state != ACTRUST_CORE_UNREGISTERED &&
-        state != ACTRUST_CORE_REGISTERED) {
-        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
-    }
-
     core_job_submit_t submit = {
         .type = ACTRUST_JOB_DISCONNECT,
     };
 
-    return core_post_job(&submit);
+    return core_submit_job(&submit, ACTRUST_CORE_UNREGISTERED, true);
 }
 
 actrust_err_t actrust_register(void)
 {
-    actrust_core_state_t state = core_get_state();
-    if (state != ACTRUST_CORE_UNREGISTERED) {
-        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
-    }
-
     core_job_submit_t submit = {
         .type = ACTRUST_JOB_REGISTER,
     };
 
-    return core_post_job(&submit);
+    return core_submit_job(&submit, ACTRUST_CORE_UNREGISTERED, false);
 }
 
 actrust_err_t actrust_data_publish(const char *data, size_t data_len)
 {
     if (data == NULL || data_len == 0) {
         return CORE_ERR(ACTRUST_ERR_INVALID_ARG);
-    }
-
-    actrust_core_state_t state = core_get_state();
-    if (state != ACTRUST_CORE_REGISTERED) {
-        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
     }
 
     if (memchr(data, '\0', data_len) != NULL) {
@@ -350,5 +402,5 @@ actrust_err_t actrust_data_publish(const char *data, size_t data_len)
         .params.send.data_len = data_len,
     };
 
-    return core_post_job(&submit);
+    return core_submit_job(&submit, ACTRUST_CORE_REGISTERED, false);
 }

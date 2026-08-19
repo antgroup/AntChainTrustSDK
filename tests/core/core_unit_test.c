@@ -19,10 +19,19 @@
 #include "adapter/system.h"
 
 #define TEST_JOB_QUEUE_TIMEOUT_MS 50u
+#define TEST_WORKER_TIMEOUT_MS    5000u
+#define TEST_WORKER_COUNT         2u
+
+typedef struct {
+    actrust_sem_t ready;
+    actrust_sem_t start;
+    actrust_err_t result;
+} core_api_worker_t;
 
 static actrust_err_t        s_last_result;
 static actrust_core_state_t s_last_state;
-static int                  s_cb_count;
+static int                  s_callbacks_seen;
+static actrust_sem_t        s_callback_sem;
 
 static void test_callback(actrust_err_t result, actrust_core_state_t state,
                           void *user_data)
@@ -30,30 +39,162 @@ static void test_callback(actrust_err_t result, actrust_core_state_t state,
     (void) user_data;
     s_last_result = result;
     s_last_state  = state;
-    s_cb_count++;
+    if (s_callback_sem != NULL) {
+        (void) actrust_sem_post(s_callback_sem);
+    }
 }
 
 static bool wait_for_callbacks(int expected_count, uint32_t timeout_ms)
 {
-    uint32_t waited_ms = 0u;
+    while (s_callbacks_seen < expected_count) {
+        if (ACTRUST_IS_ERR(actrust_sem_wait(s_callback_sem, timeout_ms))) {
+            return false;
+        }
+        s_callbacks_seen++;
+    }
+    return true;
+}
 
-    while (s_cb_count < expected_count && waited_ms < timeout_ms) {
-        actrust_sleep_ms(10u);
-        waited_ms += 10u;
+static void init_worker(void *arg)
+{
+    core_api_worker_t *worker = (core_api_worker_t *) arg;
+
+    worker->result = actrust_sem_post(worker->ready);
+    if (ACTRUST_IS_OK(worker->result)) {
+        worker->result = actrust_sem_wait(worker->start, UINT32_MAX);
+    }
+    if (ACTRUST_IS_OK(worker->result)) {
+        worker->result = actrust_init(NULL);
+    }
+}
+
+static void deinit_worker(void *arg)
+{
+    core_api_worker_t *worker = (core_api_worker_t *) arg;
+
+    worker->result = actrust_sem_post(worker->ready);
+    if (ACTRUST_IS_OK(worker->result)) {
+        worker->result = actrust_sem_wait(worker->start, UINT32_MAX);
+    }
+    if (ACTRUST_IS_OK(worker->result)) {
+        worker->result = actrust_deinit();
+    }
+}
+
+static actrust_err_t run_api_workers(core_api_worker_t *workers,
+                                     actrust_task_t    *tasks,
+                                     void (*entry)(void *))
+{
+    actrust_sem_t ready = NULL;
+    actrust_sem_t start = NULL;
+    actrust_err_t err   = actrust_sem_create(&ready, 0u);
+    if (ACTRUST_IS_ERR(err)) {
+        return err;
+    }
+    err = actrust_sem_create(&start, 0u);
+    if (ACTRUST_IS_ERR(err)) {
+        (void) actrust_sem_destroy(ready);
+        return err;
     }
 
-    return s_cb_count >= expected_count;
+    for (size_t i = 0u; i < TEST_WORKER_COUNT; ++i) {
+        workers[i].ready = ready;
+        workers[i].start = start;
+        err = actrust_task_create(&tasks[i], "core_api", entry, &workers[i], 0u,
+                                  0u);
+        if (ACTRUST_IS_ERR(err)) {
+            break;
+        }
+    }
+
+    for (size_t i = 0u; i < TEST_WORKER_COUNT && ACTRUST_IS_OK(err); ++i) {
+        err = actrust_sem_wait(ready, TEST_WORKER_TIMEOUT_MS);
+    }
+    for (size_t i = 0u; i < TEST_WORKER_COUNT; ++i) {
+        (void) actrust_sem_post(start);
+    }
+    for (size_t i = 0u; i < TEST_WORKER_COUNT; ++i) {
+        if (tasks[i] != NULL) {
+            actrust_err_t join_err = actrust_task_join(tasks[i], UINT32_MAX);
+            if (ACTRUST_IS_OK(err) && ACTRUST_IS_ERR(join_err)) {
+                err = join_err;
+            }
+        }
+    }
+
+    (void) actrust_sem_destroy(start);
+    (void) actrust_sem_destroy(ready);
+    return err;
 }
 
 void setUp(void)
 {
-    s_last_result = (actrust_err_t) -1;
-    s_last_state  = ACTRUST_CORE_UNINIT;
-    s_cb_count    = 0;
+    s_last_result    = (actrust_err_t) -1;
+    s_last_state     = ACTRUST_CORE_UNINIT;
+    s_callbacks_seen = 0;
+    s_callback_sem   = NULL;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_create(&s_callback_sem, 0u));
 }
 
 void tearDown(void)
 {
+    if (s_callback_sem != NULL) {
+        (void) actrust_sem_destroy(s_callback_sem);
+        s_callback_sem = NULL;
+    }
+}
+
+void test_concurrent_init_admits_one_caller(void)
+{
+    core_api_worker_t workers[TEST_WORKER_COUNT] = { 0 };
+    actrust_task_t    tasks[TEST_WORKER_COUNT]   = { NULL };
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_set_callback(test_callback, NULL));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, run_api_workers(workers, tasks, init_worker));
+
+    unsigned int success_count   = 0u;
+    unsigned int bad_state_count = 0u;
+    for (size_t i = 0u; i < TEST_WORKER_COUNT; ++i) {
+        if (workers[i].result == ACTRUST_OK) {
+            success_count++;
+        } else if (ACTRUST_ERR_CODE(workers[i].result) ==
+                   ACTRUST_ERR_BAD_STATE) {
+            bad_state_count++;
+        }
+    }
+
+    TEST_ASSERT_EQUAL_UINT(1u, success_count);
+    TEST_ASSERT_EQUAL_UINT(1u, bad_state_count);
+    TEST_ASSERT_TRUE(wait_for_callbacks(1, TEST_WORKER_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_deinit());
+    TEST_ASSERT_TRUE(wait_for_callbacks(2, TEST_WORKER_TIMEOUT_MS));
+}
+
+void test_concurrent_deinit_admits_one_caller(void)
+{
+    core_api_worker_t workers[TEST_WORKER_COUNT] = { 0 };
+    actrust_task_t    tasks[TEST_WORKER_COUNT]   = { NULL };
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_set_callback(test_callback, NULL));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_init(NULL));
+    TEST_ASSERT_TRUE(wait_for_callbacks(1, TEST_WORKER_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      run_api_workers(workers, tasks, deinit_worker));
+
+    unsigned int success_count   = 0u;
+    unsigned int bad_state_count = 0u;
+    for (size_t i = 0u; i < TEST_WORKER_COUNT; ++i) {
+        if (workers[i].result == ACTRUST_OK) {
+            success_count++;
+        } else if (ACTRUST_ERR_CODE(workers[i].result) ==
+                   ACTRUST_ERR_BAD_STATE) {
+            bad_state_count++;
+        }
+    }
+
+    TEST_ASSERT_EQUAL_UINT(1u, success_count);
+    TEST_ASSERT_EQUAL_UINT(1u, bad_state_count);
+    TEST_ASSERT_TRUE(wait_for_callbacks(2, TEST_WORKER_TIMEOUT_MS));
 }
 
 void test_set_callback_null(void)
@@ -255,6 +396,8 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_set_callback_null);
     RUN_TEST(test_set_callback_success);
+    RUN_TEST(test_concurrent_init_admits_one_caller);
+    RUN_TEST(test_concurrent_deinit_admits_one_caller);
     RUN_TEST(test_deinit_without_init);
     RUN_TEST(test_connect_without_init);
     RUN_TEST(test_publish_without_init);
