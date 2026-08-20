@@ -35,6 +35,7 @@
 
 /* Adapter */
 #include "adapter/network.h"
+#include "adapter/system.h"
 
 /** @brief Convenience macro to build TLS-module errors */
 #define TLS_ERR(reason) ACTRUST_ERR(ACTRUST_ERR_MODULE_COMPONENTS_TLS, (reason))
@@ -86,9 +87,51 @@ typedef struct tls_mbedtls_ctx { /* backend-specific context (mbedTLS) */
     uint32_t            io_timeout_ms;
 } tls_mbedtls_ctx_t;
 
+typedef struct {
+    uint64_t start_ms;
+    uint32_t budget_ms;
+    bool     first_attempt;
+} tls_deadline_t;
+
 /* ========================================================================
  * Private Helpers
  * ======================================================================== */
+
+static actrust_err_t tls_deadline_start(uint32_t        timeout_ms,
+                                        tls_deadline_t *deadline)
+{
+    uint64_t now = actrust_monotonic_ms();
+    if (now == 0u) {
+        return TLS_ERR(ACTRUST_ERR_HW_FAILURE);
+    }
+    deadline->start_ms      = now;
+    deadline->budget_ms     = timeout_ms;
+    deadline->first_attempt = true;
+    return ACTRUST_OK;
+}
+
+static actrust_err_t tls_deadline_remaining(tls_deadline_t *deadline,
+                                            uint32_t       *remaining_ms)
+{
+    if (deadline->first_attempt) {
+        deadline->first_attempt = false;
+        *remaining_ms           = deadline->budget_ms;
+        return ACTRUST_OK;
+    }
+
+    uint64_t now = actrust_monotonic_ms();
+    if (now == 0u) {
+        return TLS_ERR(ACTRUST_ERR_HW_FAILURE);
+    }
+
+    uint64_t elapsed = now - deadline->start_ms;
+    if (elapsed >= deadline->budget_ms) {
+        return TLS_ERR(ACTRUST_ERR_TIMEOUT);
+    }
+
+    *remaining_ms = deadline->budget_ms - (uint32_t) elapsed;
+    return ACTRUST_OK;
+}
 
 static actrust_err_t tls_map_mbedtls_err(int ret)
 {
@@ -363,20 +406,33 @@ static int tls_backend_init_ctx(tls_mbedtls_ctx_t          *mbedtls_ctx,
 }
 
 static int tls_backend_do_handshake(tls_mbedtls_ctx_t          *mbedtls_ctx,
-                                    const actrust_tls_config_t *cfg)
+                                    const actrust_tls_config_t *cfg,
+                                    tls_deadline_t             *deadline)
 {
     if (mbedtls_ctx == NULL || cfg == NULL) {
         return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
     }
 
     int ret = 0;
-    while ((ret = mbedtls_ssl_handshake(&mbedtls_ctx->ssl)) != 0) {
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
-            ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-            /* Net callback timeout controls how long this retry loop runs. */
-            continue;
+    for (;;) {
+        uint32_t      remaining_ms = 0u;
+        actrust_err_t deadline_err =
+            tls_deadline_remaining(deadline, &remaining_ms);
+        if (deadline_err != ACTRUST_OK) {
+            return (ACTRUST_ERR_CODE(deadline_err) == ACTRUST_ERR_TIMEOUT)
+                       ? MBEDTLS_ERR_SSL_TIMEOUT
+                       : MBEDTLS_ERR_SSL_INTERNAL_ERROR;
         }
-        return ret;
+        mbedtls_ctx->io_timeout_ms = remaining_ms;
+
+        ret = mbedtls_ssl_handshake(&mbedtls_ctx->ssl);
+        if (ret == 0) {
+            break;
+        }
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
+            ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+            return ret;
+        }
     }
 
     if (cfg->ca != NULL) {
@@ -392,7 +448,7 @@ static int tls_backend_do_handshake(tls_mbedtls_ctx_t          *mbedtls_ctx,
 
 static actrust_err_t tls_backend_connect(actrust_tls_t               tls,
                                          const actrust_tls_config_t *cfg,
-                                         uint32_t                    timeout_ms)
+                                         tls_deadline_t             *deadline)
 {
     if (tls == NULL || cfg == NULL || cfg->host == NULL || cfg->port == 0u ||
         cfg->crypto_ctx == NULL) {
@@ -412,9 +468,16 @@ static actrust_err_t tls_backend_connect(actrust_tls_t               tls,
         return TLS_ERR(ACTRUST_ERR_NO_MEM);
     }
 
-    int ret = tls_backend_init_ctx(mbedtls_ctx, tls, cfg, timeout_ms);
+    uint32_t      remaining_ms = 0u;
+    actrust_err_t err = tls_deadline_remaining(deadline, &remaining_ms);
+    if (err != ACTRUST_OK) {
+        ACTRUST_FREE(mbedtls_ctx);
+        return err;
+    }
+
+    int ret = tls_backend_init_ctx(mbedtls_ctx, tls, cfg, remaining_ms);
     if (ret != 0) {
-        actrust_err_t err = tls_map_mbedtls_err(ret);
+        err = tls_map_mbedtls_err(ret);
         LOG_ERROR("tls backend init failed: mbedtls=-0x%04X err=0x%08" PRIx32,
                   (unsigned int) -ret, err);
         tls_mbedtls_ctx_free(mbedtls_ctx);
@@ -422,9 +485,9 @@ static actrust_err_t tls_backend_connect(actrust_tls_t               tls,
         return err;
     }
 
-    ret = tls_backend_do_handshake(mbedtls_ctx, cfg);
+    ret = tls_backend_do_handshake(mbedtls_ctx, cfg, deadline);
     if (ret != 0) {
-        actrust_err_t err = tls_map_mbedtls_err(ret);
+        err = tls_map_mbedtls_err(ret);
         LOG_ERROR("tls handshake failed: mbedtls=-0x%04X err=0x%08" PRIx32,
                   (unsigned int) -ret, err);
         tls_mbedtls_ctx_free(mbedtls_ctx);
@@ -447,25 +510,41 @@ static actrust_err_t tls_backend_close(actrust_tls_t tls, uint32_t timeout_ms)
         return ACTRUST_OK;
     }
 
-    mbedtls_ctx->io_timeout_ms = timeout_ms;
-    /* close_notify is best-effort: stop on peer-close/EOF/non-retry errors. */
+    tls_deadline_t deadline;
+    actrust_err_t  err = tls_deadline_start(timeout_ms, &deadline);
+    if (err != ACTRUST_OK) {
+        tls_mbedtls_ctx_free(mbedtls_ctx);
+        ACTRUST_FREE(mbedtls_ctx);
+        tls->backend_ctx = NULL;
+        return err;
+    }
+
+    actrust_err_t close_err = ACTRUST_OK;
     for (;;) {
+        uint32_t remaining_ms = 0u;
+        err = tls_deadline_remaining(&deadline, &remaining_ms);
+        if (err != ACTRUST_OK) {
+            close_err = err;
+            break;
+        }
+        mbedtls_ctx->io_timeout_ms = remaining_ms;
+
         int ret = mbedtls_ssl_close_notify(&mbedtls_ctx->ssl);
         if (ret == 0 || ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY ||
             ret == MBEDTLS_ERR_SSL_CONN_EOF) {
             break;
         }
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
-            ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-            continue;
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
+            ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+            close_err = tls_map_mbedtls_err(ret);
+            break;
         }
-        break;
     }
 
     tls_mbedtls_ctx_free(mbedtls_ctx);
     ACTRUST_FREE(mbedtls_ctx);
     tls->backend_ctx = NULL;
-    return ACTRUST_OK;
+    return close_err;
 }
 
 static actrust_err_t tls_backend_write(actrust_tls_t tls, const uint8_t *buf,
@@ -481,10 +560,21 @@ static actrust_err_t tls_backend_write(actrust_tls_t tls, const uint8_t *buf,
         return TLS_ERR(ACTRUST_ERR_BAD_STATE);
     }
 
-    mbedtls_ctx->io_timeout_ms = timeout_ms;
+    tls_deadline_t deadline;
+    actrust_err_t  err = tls_deadline_start(timeout_ms, &deadline);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
     size_t write_len = (len > (size_t) INT_MAX) ? (size_t) INT_MAX : len;
 
     for (;;) {
+        uint32_t remaining_ms = 0u;
+        err = tls_deadline_remaining(&deadline, &remaining_ms);
+        if (err != ACTRUST_OK) {
+            return err;
+        }
+        mbedtls_ctx->io_timeout_ms = remaining_ms;
+
         int ret = mbedtls_ssl_write(&mbedtls_ctx->ssl, buf, write_len);
         if (ret > 0) {
             *bytes_written = (size_t) ret;
@@ -518,10 +608,21 @@ static actrust_err_t tls_backend_read(actrust_tls_t tls, uint8_t *buf,
         return TLS_ERR(ACTRUST_ERR_BAD_STATE);
     }
 
-    mbedtls_ctx->io_timeout_ms = timeout_ms;
+    tls_deadline_t deadline;
+    actrust_err_t  err = tls_deadline_start(timeout_ms, &deadline);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
     size_t read_len = (len > (size_t) INT_MAX) ? (size_t) INT_MAX : len;
 
     for (;;) {
+        uint32_t remaining_ms = 0u;
+        err = tls_deadline_remaining(&deadline, &remaining_ms);
+        if (err != ACTRUST_OK) {
+            return err;
+        }
+        mbedtls_ctx->io_timeout_ms = remaining_ms;
+
         int ret = mbedtls_ssl_read(&mbedtls_ctx->ssl, buf, read_len);
         if (ret > 0) {
             *bytes_read = (size_t) ret;
@@ -544,7 +645,7 @@ static actrust_err_t tls_backend_read(actrust_tls_t tls, uint8_t *buf,
 }
 
 static actrust_err_t tls_tcp_connect(actrust_tls_t tls, const char *host,
-                                     uint16_t port, uint32_t timeout_ms)
+                                     uint16_t port, tls_deadline_t *deadline)
 {
     if (tls == NULL || host == NULL || port == 0u) {
         return TLS_ERR(ACTRUST_ERR_INVALID_ARG);
@@ -558,9 +659,14 @@ static actrust_err_t tls_tcp_connect(actrust_tls_t tls, const char *host,
     }
 
     /* Resolve DNS. */
-    char remote_ip[16] = { 0 };
-    err =
-        actrust_net_dns_resolve(host, remote_ip, sizeof(remote_ip), timeout_ms);
+    char     remote_ip[16] = { 0 };
+    uint32_t remaining_ms  = 0u;
+    err                    = tls_deadline_remaining(deadline, &remaining_ms);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+    err = actrust_net_dns_resolve(host, remote_ip, sizeof(remote_ip),
+                                  remaining_ms);
     if (err != ACTRUST_OK) {
         LOG_WARN("tls dns resolve failed: port=%u err=0x%08" PRIx32,
                  (unsigned int) port, err);
@@ -571,7 +677,11 @@ static actrust_err_t tls_tcp_connect(actrust_tls_t tls, const char *host,
               (unsigned int) port);
 
     /* Connect to remote host. */
-    err = actrust_net_connect(tls->net, remote_ip, port, timeout_ms);
+    err = tls_deadline_remaining(deadline, &remaining_ms);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+    err = actrust_net_connect(tls->net, remote_ip, port, remaining_ms);
     if (err != ACTRUST_OK) {
         LOG_WARN("tls tcp connect failed: ip=%s port=%u err=0x%08" PRIx32,
                  remote_ip, (unsigned int) port, err);
@@ -605,7 +715,14 @@ actrust_err_t actrust_tls_connect(actrust_tls_t              *out_tls,
         return TLS_ERR(ACTRUST_ERR_NO_MEM);
     }
 
-    actrust_err_t err = tls_tcp_connect(tls, cfg->host, cfg->port, timeout_ms);
+    tls_deadline_t deadline;
+    actrust_err_t  err = tls_deadline_start(timeout_ms, &deadline);
+    if (err != ACTRUST_OK) {
+        ACTRUST_FREE(tls);
+        return err;
+    }
+
+    err = tls_tcp_connect(tls, cfg->host, cfg->port, &deadline);
     if (err != ACTRUST_OK) {
         LOG_ERROR("tls tcp connect stage failed: err=0x%08" PRIx32, err);
         if (tls->net != NULL) {
@@ -616,7 +733,7 @@ actrust_err_t actrust_tls_connect(actrust_tls_t              *out_tls,
     }
 
     /* Initialize mbedTLS backend and perform TLS handshake. */
-    err = tls_backend_connect(tls, cfg, timeout_ms);
+    err = tls_backend_connect(tls, cfg, &deadline);
     if (err != ACTRUST_OK) {
         (void) actrust_net_close(tls->net);
         ACTRUST_FREE(tls);

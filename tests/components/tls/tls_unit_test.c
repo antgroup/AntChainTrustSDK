@@ -72,6 +72,17 @@ void test_write_null_handle(void)
                           actrust_tls_write(NULL, buf, 2, 1000, &written));
 }
 
+void test_zero_timeout_invalid_handles_return(void)
+{
+    uint8_t buf[1] = { 0u };
+    size_t  count  = 0u;
+
+    TEST_ASSERT_NOT_EQUAL(
+        ACTRUST_OK, actrust_tls_write(NULL, buf, sizeof(buf), 0u, &count));
+    TEST_ASSERT_NOT_EQUAL(ACTRUST_OK,
+                          actrust_tls_read(NULL, buf, sizeof(buf), 0u, &count));
+}
+
 void test_read_null_handle(void)
 {
     uint8_t buf[16];
@@ -89,6 +100,7 @@ int main(void)
     RUN_TEST(test_close_null_contents);
     RUN_TEST(test_close_releases_handle_when_network_close_fails);
     RUN_TEST(test_write_null_handle);
+    RUN_TEST(test_zero_timeout_invalid_handles_return);
     RUN_TEST(test_read_null_handle);
     return UNITY_END();
 }
