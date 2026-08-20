@@ -77,12 +77,111 @@ struct actrust_ntp_s {
 
     bool            synced; /**< true after at least one successful sync */
     int64_t         last_offset_ms; /**< corrected_utc = wall_time + offset */
-    actrust_mutex_t lock;           /**< Mutex for thread safety */
+    bool            closing;        /**< deinit has stopped new operations */
+    uint32_t        active_users; /**< admitted operations, including waiters */
+    actrust_mutex_t admission_lock; /**< Protects closing and active_users */
+    actrust_mutex_t operation_lock; /**< Serializes sync and getters */
+    actrust_sem_t   idle_sem; /**< Posted when closing reaches zero users */
 };
 
-/* ========================================================================
- * Private Helpers
- * ======================================================================== */
+typedef struct {
+    uint64_t start_ms;
+    uint32_t budget_ms;
+} ntp_deadline_t;
+
+static actrust_err_t ntp_operation_acquire(actrust_ntp_t handle)
+{
+    actrust_err_t err = actrust_mutex_lock(handle->admission_lock);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+    if (handle->closing) {
+        (void) actrust_mutex_unlock(handle->admission_lock);
+        return NTP_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+    handle->active_users++;
+    (void) actrust_mutex_unlock(handle->admission_lock);
+
+    err = actrust_mutex_lock(handle->operation_lock);
+    if (err != ACTRUST_OK) {
+        if (actrust_mutex_lock(handle->admission_lock) == ACTRUST_OK) {
+            if (handle->active_users > 0u) {
+                handle->active_users--;
+            }
+            (void) actrust_mutex_unlock(handle->admission_lock);
+        }
+    }
+    return err;
+}
+
+static void ntp_operation_release(actrust_ntp_t handle)
+{
+    (void) actrust_mutex_unlock(handle->operation_lock);
+
+    if (actrust_mutex_lock(handle->admission_lock) != ACTRUST_OK) {
+        return;
+    }
+    if (handle->active_users > 0u) {
+        handle->active_users--;
+    }
+    if (handle->closing && handle->active_users == 0u) {
+        (void) actrust_sem_post(handle->idle_sem);
+    }
+    (void) actrust_mutex_unlock(handle->admission_lock);
+}
+
+static actrust_err_t ntp_deadline_start(uint32_t        budget_ms,
+                                        ntp_deadline_t *deadline)
+{
+    uint64_t now = actrust_monotonic_ms();
+    if (now == 0u) {
+        return NTP_ERR(ACTRUST_ERR_HW_FAILURE);
+    }
+    deadline->start_ms  = now;
+    deadline->budget_ms = budget_ms;
+    return ACTRUST_OK;
+}
+
+static actrust_err_t ntp_deadline_remaining(const ntp_deadline_t *deadline,
+                                            uint32_t             *remaining_ms)
+{
+    uint64_t now = actrust_monotonic_ms();
+    if (now == 0u) {
+        return NTP_ERR(ACTRUST_ERR_HW_FAILURE);
+    }
+
+    uint64_t elapsed = now - deadline->start_ms;
+    if (elapsed >= deadline->budget_ms) {
+        return NTP_ERR(ACTRUST_ERR_TIMEOUT);
+    }
+
+    *remaining_ms = deadline->budget_ms - (uint32_t) elapsed;
+    return ACTRUST_OK;
+}
+
+static actrust_err_t ntp_checked_time(uint64_t wall_ms, int64_t offset_ms,
+                                      uint64_t *out_ms)
+{
+    if (wall_ms == 0u) {
+        return NTP_ERR(ACTRUST_ERR_HW_FAILURE);
+    }
+
+    if (offset_ms >= 0) {
+        uint64_t offset = (uint64_t) offset_ms;
+        if (wall_ms > UINT64_MAX - offset) {
+            return NTP_ERR(ACTRUST_ERR_BAD_STATE);
+        }
+        *out_ms = wall_ms + offset;
+        return ACTRUST_OK;
+    }
+
+    uint64_t magnitude = (uint64_t) (-(offset_ms + 1)) + 1u;
+    if (wall_ms < magnitude) {
+        return NTP_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+    *out_ms = wall_ms - magnitude;
+    return ACTRUST_OK;
+}
 
 /**
  * @brief Convert UNIX wall-clock milliseconds to an SNTP timestamp
@@ -150,10 +249,24 @@ actrust_err_t actrust_ntp_init(actrust_ntp_t *out)
     snprintf(ntp->server, sizeof(ntp->server), "%s", CONFIG_ACTRUST_NTP_SERVER);
     ntp->port       = (uint16_t) NTP_DEFAULT_PORT;
     ntp->timeout_ms = (uint32_t) CONFIG_ACTRUST_NTP_TIMEOUT_MS;
-    if (actrust_mutex_create(&ntp->lock) != ACTRUST_OK) {
-        LOG_ERROR("ntp mutex create failed");
+
+    actrust_err_t err = actrust_mutex_create(&ntp->admission_lock);
+    if (err != ACTRUST_OK) {
         ACTRUST_FREE(ntp);
-        return NTP_ERR(ACTRUST_ERR_HW_FAILURE);
+        return err;
+    }
+    err = actrust_mutex_create(&ntp->operation_lock);
+    if (err != ACTRUST_OK) {
+        (void) actrust_mutex_destroy(ntp->admission_lock);
+        ACTRUST_FREE(ntp);
+        return err;
+    }
+    err = actrust_sem_create(&ntp->idle_sem, 0u);
+    if (err != ACTRUST_OK) {
+        (void) actrust_mutex_destroy(ntp->operation_lock);
+        (void) actrust_mutex_destroy(ntp->admission_lock);
+        ACTRUST_FREE(ntp);
+        return err;
     }
     *out = ntp;
     LOG_INFO("ntp initialized: server=%s port=%u timeout_ms=%lu", ntp->server,
@@ -166,9 +279,40 @@ actrust_err_t actrust_ntp_deinit(actrust_ntp_t handle)
     if (handle == NULL) {
         return NTP_ERR(ACTRUST_ERR_INVALID_ARG);
     }
-    if (actrust_mutex_destroy(handle->lock) != ACTRUST_OK) {
-        return NTP_ERR(ACTRUST_ERR_HW_FAILURE);
+    actrust_err_t err = actrust_mutex_lock(handle->admission_lock);
+    if (err != ACTRUST_OK) {
+        return err;
     }
+    if (handle->closing) {
+        (void) actrust_mutex_unlock(handle->admission_lock);
+        return NTP_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+    handle->closing    = true;
+    bool wait_for_idle = handle->active_users > 0u;
+    (void) actrust_mutex_unlock(handle->admission_lock);
+
+    if (wait_for_idle) {
+        err = actrust_sem_wait(handle->idle_sem, UINT32_MAX);
+        if (err != ACTRUST_OK) {
+            return err;
+        }
+    }
+
+    err = actrust_mutex_destroy(handle->operation_lock);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+    handle->operation_lock = NULL;
+    err                    = actrust_sem_destroy(handle->idle_sem);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+    handle->idle_sem = NULL;
+    err              = actrust_mutex_destroy(handle->admission_lock);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+    handle->admission_lock = NULL;
     LOG_INFO("ntp deinitialized: server=%s", handle->server);
     ACTRUST_FREE(handle);
     return ACTRUST_OK;
@@ -180,6 +324,18 @@ actrust_err_t actrust_ntp_sync(actrust_ntp_t handle)
         return NTP_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
+    actrust_err_t err = ntp_operation_acquire(handle);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+
+    ntp_deadline_t deadline;
+    err = ntp_deadline_start(handle->timeout_ms, &deadline);
+    if (err != ACTRUST_OK) {
+        ntp_operation_release(handle);
+        return err;
+    }
+
     /*
      * ---- Step 1: Resolve server hostname to IPv4 address ----
      */
@@ -189,8 +345,12 @@ actrust_err_t actrust_ntp_sync(actrust_ntp_t handle)
     char          ip[16];
     actrust_net_t sock = NULL;
 
-    actrust_err_t err = actrust_net_dns_resolve(handle->server, ip, sizeof(ip),
-                                                handle->timeout_ms);
+    uint32_t remaining_ms = 0u;
+    err                   = ntp_deadline_remaining(&deadline, &remaining_ms);
+    if (err != ACTRUST_OK) {
+        goto out;
+    }
+    err = actrust_net_dns_resolve(handle->server, ip, sizeof(ip), remaining_ms);
     if (err != ACTRUST_OK) {
         LOG_WARN("ntp dns resolve failed: server=%s err=0x%08" PRIx32,
                  handle->server, err);
@@ -225,20 +385,35 @@ actrust_err_t actrust_ntp_sync(actrust_ntp_t handle)
      * ---- Step 4: Send request to NTP server ----
      */
     size_t io_len = 0;
-    err           = actrust_net_sendto(sock, ip, handle->port, pkt, sizeof(pkt),
-                                       handle->timeout_ms, &io_len);
+    err           = ntp_deadline_remaining(&deadline, &remaining_ms);
+    if (err != ACTRUST_OK) {
+        goto out;
+    }
+    err = actrust_net_sendto(sock, ip, handle->port, pkt, sizeof(pkt),
+                             remaining_ms, &io_len);
     if (err != ACTRUST_OK) {
         LOG_WARN("ntp send failed: ip=%s err=0x%08" PRIx32, ip, err);
+        goto out;
+    }
+
+    if (io_len != sizeof(pkt)) {
+        err = NTP_ERR(ACTRUST_ERR_IO);
+        LOG_WARN("ntp send incomplete: sent=%zu expected=%zu", io_len,
+                 sizeof(pkt));
         goto out;
     }
 
     /*
      * ---- Step 5: Receive server response ----
      */
+    err = ntp_deadline_remaining(&deadline, &remaining_ms);
+    if (err != ACTRUST_OK) {
+        goto out;
+    }
     char     sender_ip[16];
     uint16_t sender_port = 0u;
     err = actrust_net_recvfrom(sock, sender_ip, sizeof(sender_ip), &sender_port,
-                               pkt, sizeof(pkt), handle->timeout_ms, &io_len);
+                               pkt, sizeof(pkt), remaining_ms, &io_len);
     if (err != ACTRUST_OK) {
         LOG_WARN("ntp receive failed: err=0x%08" PRIx32, err);
         goto out;
@@ -279,23 +454,16 @@ actrust_err_t actrust_ntp_sync(actrust_ntp_t handle)
     /*
      * ---- Step 7: Commit results to instance ----
      */
-    if (actrust_mutex_lock(handle->lock) != ACTRUST_OK) {
-        err = NTP_ERR(ACTRUST_ERR_HW_FAILURE);
-        goto out;
-    }
     handle->synced         = true;
     handle->last_offset_ms = resp.clockOffsetMs;
-    if (actrust_mutex_unlock(handle->lock) != ACTRUST_OK) {
-        err = NTP_ERR(ACTRUST_ERR_HW_FAILURE);
-        goto out;
-    }
-    err = ACTRUST_OK;
+    err                    = ACTRUST_OK;
     LOG_INFO("ntp sync complete: offset_ms=%" PRId64, resp.clockOffsetMs);
 
 out:
     if (sock != NULL) {
         (void) actrust_net_close(sock);
     }
+    ntp_operation_release(handle);
     return err;
 }
 
@@ -305,17 +473,16 @@ actrust_err_t actrust_ntp_get_last_offset_ms(actrust_ntp_t handle,
     if (handle == NULL || out_offset_ms == NULL) {
         return NTP_ERR(ACTRUST_ERR_INVALID_ARG);
     }
-    if (actrust_mutex_lock(handle->lock) != ACTRUST_OK) {
-        return NTP_ERR(ACTRUST_ERR_HW_FAILURE);
+    actrust_err_t err = ntp_operation_acquire(handle);
+    if (err != ACTRUST_OK) {
+        return err;
     }
     if (!handle->synced) {
-        (void) actrust_mutex_unlock(handle->lock);
+        ntp_operation_release(handle);
         return NTP_ERR(ACTRUST_ERR_NOT_READY);
     }
     *out_offset_ms = handle->last_offset_ms;
-    if (actrust_mutex_unlock(handle->lock) != ACTRUST_OK) {
-        return NTP_ERR(ACTRUST_ERR_HW_FAILURE);
-    }
+    ntp_operation_release(handle);
     return ACTRUST_OK;
 }
 
@@ -324,17 +491,21 @@ actrust_err_t actrust_ntp_now_ms(actrust_ntp_t handle, uint64_t *out_now_ms)
     if (handle == NULL || out_now_ms == NULL) {
         return NTP_ERR(ACTRUST_ERR_INVALID_ARG);
     }
-    if (actrust_mutex_lock(handle->lock) != ACTRUST_OK) {
-        return NTP_ERR(ACTRUST_ERR_HW_FAILURE);
+    actrust_err_t err = ntp_operation_acquire(handle);
+    if (err != ACTRUST_OK) {
+        return err;
     }
     if (!handle->synced) {
-        (void) actrust_mutex_unlock(handle->lock);
+        ntp_operation_release(handle);
         return NTP_ERR(ACTRUST_ERR_NOT_READY);
     }
-    *out_now_ms =
-        (uint64_t) ((int64_t) actrust_wall_time_ms() + handle->last_offset_ms);
-    if (actrust_mutex_unlock(handle->lock) != ACTRUST_OK) {
-        return NTP_ERR(ACTRUST_ERR_HW_FAILURE);
+
+    uint64_t corrected_ms = 0u;
+    err = ntp_checked_time(actrust_wall_time_ms(), handle->last_offset_ms,
+                           &corrected_ms);
+    if (err == ACTRUST_OK) {
+        *out_now_ms = corrected_ms;
     }
-    return ACTRUST_OK;
+    ntp_operation_release(handle);
+    return err;
 }
