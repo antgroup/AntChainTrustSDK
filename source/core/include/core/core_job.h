@@ -119,6 +119,9 @@ typedef struct {
     uint16_t        head;
     uint16_t        tail;
     uint16_t        count;
+    uint16_t        waiter_count;
+    uint16_t        close_wake_pending;
+    bool            closed;
     actrust_mutex_t lock;
     actrust_sem_t   sem_items;
 } actrust_job_queue_t;
@@ -134,7 +137,16 @@ typedef struct {
 actrust_err_t actrust_job_queue_init(actrust_job_queue_t *q, uint16_t depth);
 
 /**
- * @brief Deinitialise a job queue and release resources.
+ * @brief Gracefully close a job queue.
+ *
+ * New enqueue calls are rejected after close. Jobs already queued remain
+ * dequeueable, and blocked dequeue waiters are woken. A closed empty queue
+ * returns @c ACTRUST_ERR_BAD_STATE from dequeue.
+ */
+actrust_err_t actrust_job_queue_close(actrust_job_queue_t *q);
+
+/**
+ * @brief Deinitialise a closed, empty job queue and release resources.
  */
 actrust_err_t actrust_job_queue_deinit(actrust_job_queue_t *q);
 
@@ -145,6 +157,7 @@ actrust_err_t actrust_job_queue_deinit(actrust_job_queue_t *q);
  * and completed by the service.
  *
  * @return @c ACTRUST_OK or @c ACTRUST_ERR_QUEUE_FULL.
+ * @return @c ACTRUST_ERR_BAD_STATE if the queue is closed.
  * @return The underlying adapter synchronization error if locking or
  *         publishing the item token fails.
  */
@@ -161,6 +174,7 @@ actrust_err_t actrust_job_queue_enqueue(actrust_job_queue_t *q,
  * @return @c ACTRUST_OK on success.
  * @return @c ACTRUST_ERR_WOULD_BLOCK for an empty non-blocking dequeue.
  * @return @c ACTRUST_ERR_TIMEOUT if the timed wait expires.
+ * @return @c ACTRUST_ERR_BAD_STATE if the queue is closed and empty.
  * @return The underlying adapter synchronization error for other wait, lock,
  *         or compensation failures.
  */

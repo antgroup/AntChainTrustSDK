@@ -275,6 +275,165 @@ void test_publish_rejects_embedded_nul_payload(void)
     TEST_ASSERT_EQUAL(ACTRUST_ERR_INVALID_ARG, ACTRUST_ERR_CODE(err));
 }
 
+typedef struct {
+    actrust_job_queue_t *queue;
+    actrust_job_t       *job;
+    actrust_err_t        result;
+} job_queue_waiter_t;
+
+static void job_queue_waiter(void *arg)
+{
+    job_queue_waiter_t *waiter = (job_queue_waiter_t *) arg;
+    waiter->result =
+        actrust_job_queue_dequeue(waiter->queue, UINT32_MAX, &waiter->job);
+}
+
+static bool wait_for_job_queue_waiter(actrust_job_queue_t *q,
+                                      uint32_t             timeout_ms)
+{
+    uint32_t elapsed_ms = 0u;
+
+    while (elapsed_ms < timeout_ms) {
+        if (actrust_mutex_lock(q->lock) != ACTRUST_OK) {
+            return false;
+        }
+        bool waiting = q->waiter_count > 0u;
+        (void) actrust_mutex_unlock(q->lock);
+        if (waiting) {
+            return true;
+        }
+        actrust_sleep_ms(1u);
+        elapsed_ms++;
+    }
+
+    return false;
+}
+
+void test_job_queue_close_rejects_enqueue(void)
+{
+    actrust_job_queue_t q   = { 0 };
+    actrust_job_t       job = { .type = ACTRUST_JOB_CONNECT };
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_init(&q, 1u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_close(&q));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_BAD_STATE,
+                      ACTRUST_ERR_CODE(actrust_job_queue_enqueue(&q, &job)));
+    TEST_ASSERT_EQUAL_UINT16(0u, q.count);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_deinit(&q));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_deinit(&q));
+}
+
+void test_job_queue_close_drains_queued_jobs(void)
+{
+    actrust_job_queue_t q      = { 0 };
+    actrust_job_t       jobs[] = {
+        { .type = ACTRUST_JOB_CONNECT },
+        { .type = ACTRUST_JOB_REGISTER },
+    };
+    actrust_job_t *out_job = NULL;
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_init(&q, 2u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_enqueue(&q, &jobs[0]));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_enqueue(&q, &jobs[1]));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_close(&q));
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_dequeue(&q, 0u, &out_job));
+    TEST_ASSERT_EQUAL_PTR(&jobs[0], out_job);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_dequeue(&q, 0u, &out_job));
+    TEST_ASSERT_EQUAL_PTR(&jobs[1], out_job);
+    TEST_ASSERT_EQUAL(
+        ACTRUST_ERR_BAD_STATE,
+        ACTRUST_ERR_CODE(actrust_job_queue_dequeue(&q, 0u, &out_job)));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_deinit(&q));
+}
+
+void test_job_queue_close_wakes_blocked_dequeue(void)
+{
+    actrust_job_queue_t q      = { 0 };
+    actrust_task_t      task   = NULL;
+    job_queue_waiter_t  waiter = { .queue  = &q,
+                                   .job    = NULL,
+                                   .result = ACTRUST_OK };
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_init(&q, 1u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_task_create(&task, "job_wait", job_queue_waiter,
+                                          &waiter, 0u, 0u));
+    TEST_ASSERT_TRUE(wait_for_job_queue_waiter(&q, TEST_WORKER_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_close(&q));
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_task_join(task, TEST_WORKER_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_BAD_STATE, ACTRUST_ERR_CODE(waiter.result));
+    TEST_ASSERT_NULL(waiter.job);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_deinit(&q));
+}
+
+void test_job_queue_close_wakes_multiple_dequeues(void)
+{
+    actrust_job_queue_t q          = { 0 };
+    actrust_task_t      tasks[2]   = { NULL };
+    job_queue_waiter_t  waiters[2] = {
+        { .queue = &q, .job = NULL, .result = ACTRUST_OK },
+        { .queue = &q, .job = NULL, .result = ACTRUST_OK },
+    };
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_init(&q, 1u));
+    for (size_t i = 0u; i < 2u; ++i) {
+        TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_task_create(&tasks[i], "job_wait",
+                                                          job_queue_waiter,
+                                                          &waiters[i], 0u, 0u));
+    }
+
+    uint32_t elapsed_ms = 0u;
+    for (;;) {
+        TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mutex_lock(q.lock));
+        bool all_waiting = q.waiter_count == 2u;
+        TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mutex_unlock(q.lock));
+        if (all_waiting) {
+            break;
+        }
+        TEST_ASSERT_LESS_THAN(TEST_WORKER_TIMEOUT_MS, elapsed_ms);
+        actrust_sleep_ms(1u);
+        elapsed_ms++;
+    }
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_close(&q));
+    for (size_t i = 0u; i < 2u; ++i) {
+        TEST_ASSERT_EQUAL(ACTRUST_OK,
+                          actrust_task_join(tasks[i], TEST_WORKER_TIMEOUT_MS));
+        TEST_ASSERT_EQUAL(ACTRUST_ERR_BAD_STATE,
+                          ACTRUST_ERR_CODE(waiters[i].result));
+        TEST_ASSERT_NULL(waiters[i].job);
+    }
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_deinit(&q));
+}
+
+void test_job_pool_exhaustion_recovers(void)
+{
+    actrust_job_pool_t pool                                    = { 0 };
+    actrust_job_t     *jobs[CONFIG_ACTRUST_CORE_JOB_POOL_SIZE] = { NULL };
+    actrust_job_t     *extra                                   = NULL;
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_pool_init(&pool));
+    for (size_t i = 0u; i < CONFIG_ACTRUST_CORE_JOB_POOL_SIZE; ++i) {
+        TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_alloc(&pool, &jobs[i]));
+        TEST_ASSERT_NOT_NULL(jobs[i]);
+    }
+
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_NO_RESOURCE,
+                      ACTRUST_ERR_CODE(actrust_job_alloc(&pool, &extra)));
+    TEST_ASSERT_NULL(extra);
+
+    for (size_t i = 0u; i < CONFIG_ACTRUST_CORE_JOB_POOL_SIZE; ++i) {
+        TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_release(&pool, jobs[i]));
+    }
+    TEST_ASSERT_EQUAL_INT(CONFIG_ACTRUST_CORE_JOB_POOL_SIZE - 1, pool.free_top);
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_alloc(&pool, &extra));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_release(&pool, extra));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_pool_deinit(&pool));
+}
+
 void test_job_queue_dequeue_nonblocking_preserves_would_block(void)
 {
     actrust_job_queue_t q       = { 0 };
@@ -286,6 +445,7 @@ void test_job_queue_dequeue_nonblocking_preserves_would_block(void)
     TEST_ASSERT_EQUAL(ACTRUST_ERR_MODULE_ADAPTER_SYSTEM,
                       ACTRUST_ERR_MODULE(err));
     TEST_ASSERT_EQUAL(ACTRUST_ERR_WOULD_BLOCK, ACTRUST_ERR_CODE(err));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_close(&q));
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_deinit(&q));
 }
 
@@ -301,6 +461,7 @@ void test_job_queue_dequeue_preserves_timeout(void)
     TEST_ASSERT_EQUAL(ACTRUST_ERR_MODULE_ADAPTER_SYSTEM,
                       ACTRUST_ERR_MODULE(err));
     TEST_ASSERT_EQUAL(ACTRUST_ERR_TIMEOUT, ACTRUST_ERR_CODE(err));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_close(&q));
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_deinit(&q));
 }
 
@@ -322,6 +483,7 @@ void test_job_queue_dequeue_restores_item_token_on_lock_failure(void)
     TEST_ASSERT_EQUAL(ACTRUST_ERR_INVALID_ARG, ACTRUST_ERR_CODE(err));
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_dequeue(&q, 0u, &out_job));
     TEST_ASSERT_EQUAL_PTR(&job, out_job);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_close(&q));
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_job_queue_deinit(&q));
 }
 
@@ -402,6 +564,11 @@ int main(void)
     RUN_TEST(test_connect_without_init);
     RUN_TEST(test_publish_without_init);
     RUN_TEST(test_publish_rejects_embedded_nul_payload);
+    RUN_TEST(test_job_queue_close_rejects_enqueue);
+    RUN_TEST(test_job_queue_close_drains_queued_jobs);
+    RUN_TEST(test_job_queue_close_wakes_blocked_dequeue);
+    RUN_TEST(test_job_queue_close_wakes_multiple_dequeues);
+    RUN_TEST(test_job_pool_exhaustion_recovers);
     RUN_TEST(test_job_queue_dequeue_nonblocking_preserves_would_block);
     RUN_TEST(test_job_queue_dequeue_preserves_timeout);
     RUN_TEST(test_job_queue_dequeue_restores_item_token_on_lock_failure);

@@ -83,6 +83,8 @@ typedef struct {
         job_queue; /**< FIFO queue used to hand jobs to the service task. */
     actrust_task_t
         service_task; /**< Background task that dequeues and executes jobs. */
+    actrust_err_t service_result; /**< Service loop result returned after a
+                                     successful join. */
 
     /* Cloud runtime */
     actrust_cloud_t
