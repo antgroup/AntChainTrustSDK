@@ -38,15 +38,39 @@ actrust_err_t actrust_queue_create(actrust_queue_t *out_queue, size_t capacity,
                                    size_t item_size);
 
 /**
+ * @brief Close a queue and stop all current and future operations.
+ *
+ * Closing interrupts push/pop calls blocked in the queue. Operations admitted
+ * before close return either their normal result or @c ACTRUST_ERR_BAD_STATE;
+ * all new push/pop/size calls return @c ACTRUST_ERR_BAD_STATE. Items still
+ * queued when close begins are discarded when the queue is destroyed and cannot
+ * be popped. Repeated close calls are allowed.
+ *
+ * @param[in] queue Queue handle.
+ *
+ * @return @c ACTRUST_OK when the queue is closed and all admitted operations
+ *         have exited.
+ * @return @c ACTRUST_ERR_INVALID_ARG for an invalid handle.
+ * @return The underlying Adapter synchronization error if locking fails.
+ */
+actrust_err_t actrust_queue_close(actrust_queue_t queue);
+
+/**
  * @brief Destroy a queue and release all resources.
  *
- * @warning Callers must ensure no concurrent push/pop operations are running
- *          when destroying a queue.
+ * Destroy implicitly closes an open queue. Callers may invoke close while
+ * push/pop operations are already running or blocked, but the owner must stop
+ * all sources of new calls before final destroy because copied raw handles
+ * cannot be invalidated after the object is freed.
  *
- * @param[in,out] queue  Pointer to queue handle; set to NULL on return.
+ * @param[in,out] queue  Pointer to queue handle; set to NULL only after every
+ *                       owned primitive is destroyed successfully.
  *
  * @return @c ACTRUST_OK on success.
  * @return @c ACTRUST_ERR_INVALID_ARG for invalid handle.
+ * @return The underlying Adapter error when close or primitive destruction
+ *         fails. The handle remains owned by the caller and destroy may be
+ *         retried.
  */
 actrust_err_t actrust_queue_destroy(actrust_queue_t *queue);
 
@@ -65,6 +89,7 @@ actrust_err_t actrust_queue_destroy(actrust_queue_t *queue);
  * @return @c ACTRUST_ERR_TIMEOUT if the timed wait expires.
  * @return The underlying adapter synchronization error for other wait or
  *         semaphore failures.
+ * @return @c ACTRUST_ERR_BAD_STATE if the queue is closing or closed.
  * @return @c ACTRUST_ERR_INVALID_ARG for invalid arguments.
  */
 actrust_err_t actrust_queue_push(actrust_queue_t queue, const void *item,
@@ -84,6 +109,7 @@ actrust_err_t actrust_queue_push(actrust_queue_t queue, const void *item,
  * @return @c ACTRUST_ERR_TIMEOUT if the timed wait expires.
  * @return The underlying adapter synchronization error for other wait or
  *         semaphore failures.
+ * @return @c ACTRUST_ERR_BAD_STATE if the queue is closing or closed.
  * @return @c ACTRUST_ERR_INVALID_ARG for invalid arguments.
  */
 actrust_err_t actrust_queue_pop(actrust_queue_t queue, void *out_item,
@@ -96,6 +122,7 @@ actrust_err_t actrust_queue_pop(actrust_queue_t queue, void *out_item,
  * @param[out] out_size  Receives the current element count.
  *
  * @return @c ACTRUST_OK on success.
+ * @return @c ACTRUST_ERR_BAD_STATE if the queue is closing or closed.
  * @return @c ACTRUST_ERR_INVALID_ARG for invalid arguments.
  */
 actrust_err_t actrust_queue_size(actrust_queue_t queue, size_t *out_size);

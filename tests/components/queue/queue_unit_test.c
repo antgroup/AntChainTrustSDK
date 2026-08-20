@@ -12,7 +12,45 @@
 /* Queue */
 #include "queue/queue.h"
 
-#define TEST_TIMEOUT_MS 50u
+/* Adapter */
+#include "adapter/system.h"
+
+#define TEST_TIMEOUT_MS        50u
+#define TEST_WORKER_TIMEOUT_MS 1000u
+
+typedef enum {
+    TEST_QUEUE_PUSH = 0,
+    TEST_QUEUE_POP,
+} test_queue_operation_t;
+
+typedef struct {
+    actrust_queue_t        queue;
+    actrust_sem_t          ready;
+    actrust_sem_t          returned;
+    test_queue_operation_t operation;
+    int                    value;
+    actrust_err_t          result;
+} queue_waiter_t;
+
+static void queue_waiter_task(void *arg)
+{
+    queue_waiter_t *waiter = (queue_waiter_t *) arg;
+
+    waiter->result = actrust_sem_post(waiter->ready);
+    if (ACTRUST_IS_ERR(waiter->result)) {
+        return;
+    }
+
+    if (waiter->operation == TEST_QUEUE_PUSH) {
+        waiter->result =
+            actrust_queue_push(waiter->queue, &waiter->value, UINT32_MAX);
+    } else {
+        waiter->result =
+            actrust_queue_pop(waiter->queue, &waiter->value, UINT32_MAX);
+    }
+
+    (void) actrust_sem_post(waiter->returned);
+}
 
 static actrust_queue_t queue;
 
@@ -69,6 +107,94 @@ void test_destroy_null_contents(void)
 }
 
 void test_destroy_sets_null(void)
+{
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_queue_create(&queue, 2u, sizeof(int)));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_destroy(&queue));
+    TEST_ASSERT_NULL(queue);
+}
+
+void test_close_is_idempotent(void)
+{
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_queue_create(&queue, 2u, sizeof(int)));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_close(queue));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_close(queue));
+}
+
+void test_close_rejects_operations(void)
+{
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_queue_create(&queue, 2u, sizeof(int)));
+
+    int value = 7;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_push(queue, &value, 0u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_close(queue));
+
+    size_t size = 0u;
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_BAD_STATE,
+                      ACTRUST_ERR_CODE(actrust_queue_push(queue, &value, 0u)));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_BAD_STATE,
+                      ACTRUST_ERR_CODE(actrust_queue_pop(queue, &value, 0u)));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_BAD_STATE,
+                      ACTRUST_ERR_CODE(actrust_queue_size(queue, &size)));
+}
+
+static void test_close_wakes_waiter(test_queue_operation_t operation)
+{
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_queue_create(&queue, 1u, sizeof(int)));
+
+    if (operation == TEST_QUEUE_PUSH) {
+        int value = 1;
+        TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_push(queue, &value, 0u));
+    }
+
+    actrust_sem_t  ready    = NULL;
+    actrust_sem_t  returned = NULL;
+    actrust_task_t task     = NULL;
+    queue_waiter_t waiter   = {
+          .queue     = queue,
+          .ready     = NULL,
+          .returned  = NULL,
+          .operation = operation,
+          .value     = 2,
+          .result    = ACTRUST_OK,
+    };
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_create(&ready, 0u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_create(&returned, 0u));
+    waiter.ready    = ready;
+    waiter.returned = returned;
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_task_create(&task, "queue_wait",
+                                          queue_waiter_task, &waiter, 0u, 0u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_sem_wait(ready, TEST_WORKER_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_WOULD_BLOCK,
+                      ACTRUST_ERR_CODE(actrust_sem_wait(returned, 0u)));
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_close(queue));
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_sem_wait(returned, TEST_WORKER_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_BAD_STATE, ACTRUST_ERR_CODE(waiter.result));
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_task_join(task, TEST_WORKER_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_destroy(returned));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_destroy(ready));
+}
+
+void test_close_wakes_blocked_push(void)
+{
+    test_close_wakes_waiter(TEST_QUEUE_PUSH);
+}
+
+void test_close_wakes_blocked_pop(void)
+{
+    test_close_wakes_waiter(TEST_QUEUE_POP);
+}
+
+void test_destroy_implicitly_closes(void)
 {
     TEST_ASSERT_EQUAL(ACTRUST_OK,
                       actrust_queue_create(&queue, 2u, sizeof(int)));
@@ -248,6 +374,11 @@ int main(void)
     RUN_TEST(test_destroy_null_handle);
     RUN_TEST(test_destroy_null_contents);
     RUN_TEST(test_destroy_sets_null);
+    RUN_TEST(test_close_is_idempotent);
+    RUN_TEST(test_close_rejects_operations);
+    RUN_TEST(test_close_wakes_blocked_push);
+    RUN_TEST(test_close_wakes_blocked_pop);
+    RUN_TEST(test_destroy_implicitly_closes);
     RUN_TEST(test_push_null_queue);
     RUN_TEST(test_push_null_item);
     RUN_TEST(test_pop_null_queue);
