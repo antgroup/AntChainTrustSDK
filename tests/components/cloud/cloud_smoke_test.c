@@ -132,7 +132,16 @@ void test_cloud_main_flow(void)
 
 int main(void)
 {
-    (void) actrust_log_init();
+    actrust_err_t err = actrust_lifecycle_lock();
+    if (err != ACTRUST_OK) {
+        return 1;
+    }
+
+    err                  = actrust_log_init();
+    actrust_err_t unlock = actrust_lifecycle_unlock();
+    if (err != ACTRUST_OK || unlock != ACTRUST_OK) {
+        return 1;
+    }
 
     UNITY_BEGIN();
     RUN_TEST(test_prepare_environment);

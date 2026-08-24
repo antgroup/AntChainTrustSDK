@@ -255,9 +255,15 @@ actrust_err_t actrust_init(const actrust_config_t *config)
         (void) actrust_lifecycle_unlock();
         return CORE_ERR(ACTRUST_ERR_NOT_READY);
     }
+    err = actrust_log_init();
+    if (ACTRUST_IS_ERR(err)) {
+        (void) actrust_lifecycle_unlock();
+        return err;
+    }
 
-    (void) actrust_log_init();
-    LOG_INFO("core init requested");
+    ctx->state = ACTRUST_CORE_INITING;
+
+    bool service_start_failed = false;
 
     err = actrust_mutex_create(&ctx->lock);
     if (ACTRUST_IS_ERR(err)) {
@@ -289,7 +295,7 @@ actrust_err_t actrust_init(const actrust_config_t *config)
 
     err = core_service_start();
     if (ACTRUST_IS_ERR(err)) {
-        LOG_ERROR("core service start failed: 0x%08" PRIx32, err);
+        service_start_failed = true;
         goto fail_service;
     }
 
@@ -313,7 +319,11 @@ fail_lock:
     (void) actrust_mutex_destroy(ctx->lock);
     ctx->lock = NULL;
 fail_gate:
+    ctx->state = ACTRUST_CORE_UNINIT;
     (void) actrust_lifecycle_unlock();
+    if (service_start_failed) {
+        LOG_ERROR("core service start failed: 0x%08" PRIx32, err);
+    }
     return err;
 }
 
