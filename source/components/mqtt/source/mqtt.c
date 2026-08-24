@@ -107,6 +107,8 @@ typedef struct {
     MQTTAgentConnectArgs_t connect_args;
     MQTTConnectInfo_t      connect_info;
     uint32_t               connect_generation;
+    size_t                 alloc_len;
+    char                   client_id[];
 } mqtt_connect_operation_t;
 
 typedef struct {
@@ -174,6 +176,183 @@ static actrust_err_t mqtt_enqueue_status_to_actrust_err(MQTTStatus_t status);
  * Generic Helpers
  * ======================================================================== */
 
+static size_t mqtt_owned_string_len(const char *value)
+{
+    return value == NULL ? 0u : strlen(value) + 1u;
+}
+
+static void mqtt_owned_config_release(actrust_mqtt_config_t *config)
+{
+    if (config == NULL) {
+        return;
+    }
+
+    if (config->transport.type == ACTRUST_MQTT_TRANSPORT_TLS) {
+        actrust_tls_config_t *tls = &config->transport.config.tls;
+        actrust_secure_free((void *) tls->client_cert, tls->client_cert_len);
+        actrust_secure_free((void *) tls->ca, tls->ca_len);
+        actrust_secure_free((void *) tls->host,
+                            mqtt_owned_string_len(tls->host));
+    } else if (config->transport.type == ACTRUST_MQTT_TRANSPORT_TCP) {
+        const char *host = config->transport.config.tcp.host;
+        actrust_secure_free((void *) host, mqtt_owned_string_len(host));
+    }
+    actrust_secure_free((void *) config->client_id,
+                        mqtt_owned_string_len(config->client_id));
+    actrust_secure_zeroize(config, sizeof(*config));
+}
+
+static actrust_err_t mqtt_owned_string_copy(char **out, const char *input)
+{
+    size_t len;
+
+    if (out == NULL || input == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    len = strlen(input);
+    if (len == SIZE_MAX) {
+        return MQTT_ERR(ACTRUST_ERR_BUF_TOO_SMALL);
+    }
+    *out = (char *) ACTRUST_CALLOC(1u, len + 1u);
+    if (*out == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_NO_MEM);
+    }
+    memcpy(*out, input, len);
+    return ACTRUST_OK;
+}
+
+static actrust_err_t mqtt_owned_bytes_copy(uint8_t **out, const uint8_t *input,
+                                           size_t len)
+{
+    if (out == NULL || (input == NULL && len > 0u)) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    if (len == 0u) {
+        return ACTRUST_OK;
+    }
+
+    *out = (uint8_t *) ACTRUST_CALLOC(1u, len);
+    if (*out == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_NO_MEM);
+    }
+    memcpy(*out, input, len);
+    return ACTRUST_OK;
+}
+
+static actrust_err_t mqtt_config_validate(const actrust_mqtt_config_t *config)
+{
+    if (config == NULL || config->client_id == NULL ||
+        config->client_id[0] == '\0' ||
+        strlen(config->client_id) > UINT16_MAX) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    if (config->transport.type == ACTRUST_MQTT_TRANSPORT_TCP) {
+        const actrust_mqtt_tcp_config_t *tcp = &config->transport.config.tcp;
+        return (tcp->host != NULL && tcp->host[0] != '\0' && tcp->port != 0u)
+                   ? ACTRUST_OK
+                   : MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    if (config->transport.type != ACTRUST_MQTT_TRANSPORT_TLS) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    const actrust_tls_config_t *tls = &config->transport.config.tls;
+    if (tls->host == NULL || tls->host[0] == '\0' || tls->port == 0u ||
+        tls->crypto_ctx == NULL || (tls->ca == NULL && tls->ca_len > 0u) ||
+        (tls->ca != NULL && tls->ca_len == 0u) ||
+        (tls->client_cert == NULL && tls->client_cert_len > 0u) ||
+        (tls->client_cert != NULL && tls->client_cert_len == 0u) ||
+        ((tls->client_cert == NULL) != (tls->client_key == NULL)) ||
+        (tls->ca == NULL && tls->insecure == false)) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    if (tls->ca != NULL && tls->ca_format != ACTRUST_TLS_CERT_FORMAT_PEM &&
+        tls->ca_format != ACTRUST_TLS_CERT_FORMAT_DER) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    if (tls->client_cert != NULL &&
+        tls->client_cert_format != ACTRUST_TLS_CERT_FORMAT_PEM &&
+        tls->client_cert_format != ACTRUST_TLS_CERT_FORMAT_DER) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    return ACTRUST_OK;
+}
+
+static actrust_err_t mqtt_owned_config_clone(actrust_mqtt_config_t       *out,
+                                             const actrust_mqtt_config_t *input)
+{
+    actrust_err_t err;
+
+    if (out == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    err = mqtt_config_validate(input);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+
+    actrust_secure_zeroize(out, sizeof(*out));
+    out->transport.type = input->transport.type;
+
+    err = mqtt_owned_string_copy((char **) &out->client_id, input->client_id);
+    if (err != ACTRUST_OK) {
+        goto fail;
+    }
+
+    switch (input->transport.type) {
+        case ACTRUST_MQTT_TRANSPORT_TCP: {
+            const actrust_mqtt_tcp_config_t *src = &input->transport.config.tcp;
+            actrust_mqtt_tcp_config_t       *dst = &out->transport.config.tcp;
+            err = mqtt_owned_string_copy((char **) &dst->host, src->host);
+            if (err != ACTRUST_OK) {
+                goto fail;
+            }
+            dst->port = src->port;
+            break;
+        }
+        case ACTRUST_MQTT_TRANSPORT_TLS: {
+            const actrust_tls_config_t *src = &input->transport.config.tls;
+            actrust_tls_config_t       *dst = &out->transport.config.tls;
+            err = mqtt_owned_string_copy((char **) &dst->host, src->host);
+            if (err != ACTRUST_OK) {
+                goto fail;
+            }
+            dst->ca_len          = src->ca_len;
+            dst->client_cert_len = src->client_cert_len;
+            err = mqtt_owned_bytes_copy((uint8_t **) &dst->ca, src->ca,
+                                        src->ca_len);
+            if (err != ACTRUST_OK) {
+                goto fail;
+            }
+            err = mqtt_owned_bytes_copy((uint8_t **) &dst->client_cert,
+                                        src->client_cert, src->client_cert_len);
+            if (err != ACTRUST_OK) {
+                goto fail;
+            }
+            dst->port               = src->port;
+            dst->ca_len             = src->ca_len;
+            dst->ca_format          = src->ca_format;
+            dst->insecure           = src->insecure;
+            dst->client_cert_len    = src->client_cert_len;
+            dst->client_cert_format = src->client_cert_format;
+            dst->client_key         = src->client_key;
+            dst->crypto_ctx         = src->crypto_ctx;
+            break;
+        }
+        default:
+            err = MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+            goto fail;
+    }
+
+    return ACTRUST_OK;
+
+fail:
+    mqtt_owned_config_release(out);
+    return err;
+}
+
 static void mqtt_lock(actrust_mqtt_t mqtt)
 {
     if (mqtt != NULL && mqtt->lock != NULL) {
@@ -216,16 +395,62 @@ static uint32_t mqtt_next_connect_generation_locked(actrust_mqtt_t mqtt)
     return mqtt->connect_generation;
 }
 
-static uint32_t mqtt_start_connect_attempt(actrust_mqtt_t mqtt)
+static actrust_err_t mqtt_begin_connect(actrust_mqtt_t        mqtt,
+                                        actrust_mqtt_state_t *previous_state,
+                                        uint32_t             *generation)
 {
-    uint32_t generation;
+    if (mqtt == NULL || previous_state == NULL || generation == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
 
     mqtt_lock(mqtt);
-    generation  = mqtt_next_connect_generation_locked(mqtt);
-    mqtt->state = ACTRUST_MQTT_STATE_CONNECTING;
-    mqtt_unlock(mqtt);
+    if (mqtt->state != ACTRUST_MQTT_STATE_INITIALIZED &&
+        (mqtt->state != ACTRUST_MQTT_STATE_DISCONNECTED ||
+         mqtt->process_running == true)) {
+        mqtt_unlock(mqtt);
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
 
-    return generation;
+    *previous_state = mqtt->state;
+    *generation     = mqtt_next_connect_generation_locked(mqtt);
+    mqtt->state     = ACTRUST_MQTT_STATE_CONNECTING;
+    mqtt_unlock(mqtt);
+    return ACTRUST_OK;
+}
+
+static void mqtt_release_connect_reservation(actrust_mqtt_t       mqtt,
+                                             uint32_t             generation,
+                                             actrust_mqtt_state_t state)
+{
+    mqtt_lock(mqtt);
+    if (mqtt->connect_generation == generation &&
+        mqtt->state == ACTRUST_MQTT_STATE_CONNECTING) {
+        mqtt->state = state;
+    }
+    mqtt_unlock(mqtt);
+}
+
+static actrust_err_t mqtt_install_config(actrust_mqtt_t         mqtt,
+                                         actrust_mqtt_config_t *candidate,
+                                         actrust_mqtt_config_t *replaced,
+                                         uint32_t               generation)
+{
+    if (mqtt == NULL || candidate == NULL || replaced == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    mqtt_lock(mqtt);
+    if (mqtt->connect_generation != generation ||
+        mqtt->state != ACTRUST_MQTT_STATE_CONNECTING) {
+        mqtt_unlock(mqtt);
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+
+    *replaced    = mqtt->config;
+    mqtt->config = *candidate;
+    actrust_secure_zeroize(candidate, sizeof(*candidate));
+    mqtt_unlock(mqtt);
+    return ACTRUST_OK;
 }
 
 static bool mqtt_complete_connect_attempt(actrust_mqtt_t       mqtt,
@@ -890,7 +1115,13 @@ static void mqtt_agent_command_complete(
             break;
     }
 
-    ACTRUST_FREE(base);
+    if (base->type == MQTT_OPERATION_CONNECT) {
+        mqtt_connect_operation_t *connect_op =
+            (mqtt_connect_operation_t *) base;
+        actrust_secure_free(connect_op, connect_op->alloc_len);
+    } else {
+        ACTRUST_FREE(base);
+    }
 }
 
 /* ========================================================================
@@ -902,8 +1133,21 @@ static actrust_err_t mqtt_enqueue_connect_command(actrust_mqtt_t mqtt,
                                                   uint32_t connect_generation,
                                                   uint32_t block_time_ms)
 {
-    mqtt_connect_operation_t *op =
-        (mqtt_connect_operation_t *) ACTRUST_CALLOC(1, sizeof(*op));
+    size_t                    client_id_len;
+    size_t                    alloc_len;
+    mqtt_connect_operation_t *op;
+    MQTTStatus_t              status;
+
+    if (mqtt == NULL || mqtt->config.client_id == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+    client_id_len = strlen(mqtt->config.client_id);
+    if (client_id_len > UINT16_MAX || client_id_len == SIZE_MAX ||
+        client_id_len + 1u > SIZE_MAX - sizeof(*op)) {
+        return MQTT_ERR(ACTRUST_ERR_BUF_TOO_SMALL);
+    }
+    alloc_len = sizeof(*op) + client_id_len + 1u;
+    op        = (mqtt_connect_operation_t *) ACTRUST_CALLOC(1u, alloc_len);
     if (op == NULL) {
         return MQTT_ERR(ACTRUST_ERR_NO_MEM);
     }
@@ -911,11 +1155,13 @@ static actrust_err_t mqtt_enqueue_connect_command(actrust_mqtt_t mqtt,
     op->base.type          = MQTT_OPERATION_CONNECT;
     op->base.mqtt          = mqtt;
     op->connect_generation = connect_generation;
+    op->alloc_len          = alloc_len;
+    memcpy(op->client_id, mqtt->config.client_id, client_id_len + 1u);
 
     op->connect_info.cleanSession           = clean_session;
     op->connect_info.keepAliveSeconds       = CONFIG_ACTRUST_MQTT_KEEPALIVE_SEC;
-    op->connect_info.pClientIdentifier      = mqtt->config.client_id;
-    op->connect_info.clientIdentifierLength = strlen(mqtt->config.client_id);
+    op->connect_info.pClientIdentifier      = op->client_id;
+    op->connect_info.clientIdentifierLength = client_id_len;
 
     op->connect_args.pConnectInfo = &op->connect_info;
     op->connect_args.pWillInfo    = NULL;
@@ -927,10 +1173,9 @@ static actrust_err_t mqtt_enqueue_connect_command(actrust_mqtt_t mqtt,
         .blockTimeMs                 = block_time_ms,
     };
 
-    MQTTStatus_t status =
-        MQTTAgent_Connect(&mqtt->agent_ctx, &op->connect_args, &cmd_info);
+    status = MQTTAgent_Connect(&mqtt->agent_ctx, &op->connect_args, &cmd_info);
     if (status != MQTTSuccess) {
-        ACTRUST_FREE(op);
+        actrust_secure_free(op, alloc_len);
     }
 
     return mqtt_enqueue_status_to_actrust_err(status);
@@ -1256,6 +1501,7 @@ actrust_err_t actrust_mqtt_deinit(actrust_mqtt_t mqtt)
 
     (void) MQTTAgent_CancelAll(&mqtt->agent_ctx);
     mqtt_transport_close(mqtt);
+    mqtt_owned_config_release(&mqtt->config);
     (void) actrust_crypto_deinit(&mqtt->crypto_ctx);
     (void) actrust_queue_destroy(&mqtt->command_queue);
     ACTRUST_FREE(mqtt->subscriptions);
@@ -1292,31 +1538,40 @@ actrust_err_t actrust_mqtt_set_callbacks(
 actrust_err_t actrust_mqtt_connect(actrust_mqtt_t               mqtt,
                                    const actrust_mqtt_config_t *config)
 {
-    if (mqtt == NULL || config == NULL || config->client_id == NULL) {
+    actrust_mqtt_config_t candidate;
+    actrust_mqtt_config_t replaced;
+    actrust_mqtt_state_t  previous_state;
+    uint32_t              connect_generation;
+    actrust_err_t         err;
+
+    if (mqtt == NULL || config == NULL) {
         return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    mqtt_lock(mqtt);
-    mqtt->config = *config;
-    mqtt_unlock(mqtt);
-
-    actrust_mqtt_state_t state;
-    mqtt_get_state(mqtt, &state);
-    if (state == ACTRUST_MQTT_STATE_CONNECTED ||
-        state == ACTRUST_MQTT_STATE_CONNECTING) {
-        return MQTT_ERR(
-            ACTRUST_ERR_BAD_STATE); // Already connected or connecting.
+    err = mqtt_begin_connect(mqtt, &previous_state, &connect_generation);
+    if (err != ACTRUST_OK) {
+        return err;
     }
 
-    if (state != ACTRUST_MQTT_STATE_INITIALIZED &&
-        state != ACTRUST_MQTT_STATE_DISCONNECTED) {
-        return MQTT_ERR(
-            ACTRUST_ERR_BAD_STATE); // Not in a valid state to connect.
+    actrust_secure_zeroize(&candidate, sizeof(candidate));
+    actrust_secure_zeroize(&replaced, sizeof(replaced));
+    err = mqtt_owned_config_clone(&candidate, config);
+    if (err != ACTRUST_OK) {
+        mqtt_release_connect_reservation(mqtt, connect_generation,
+                                         previous_state);
+        return err;
     }
 
-    uint32_t connect_generation = mqtt_start_connect_attempt(mqtt);
+    err = mqtt_install_config(mqtt, &candidate, &replaced, connect_generation);
+    if (err != ACTRUST_OK) {
+        mqtt_owned_config_release(&candidate);
+        mqtt_release_connect_reservation(mqtt, connect_generation,
+                                         previous_state);
+        return err;
+    }
+    mqtt_owned_config_release(&replaced);
 
-    actrust_err_t err = mqtt_transport_open(mqtt);
+    err = mqtt_transport_open(mqtt);
     if (err != ACTRUST_OK) {
         mqtt_set_state(mqtt, ACTRUST_MQTT_STATE_DISCONNECTED);
         return err;

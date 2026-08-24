@@ -73,6 +73,16 @@ typedef struct {
 
 /**
  * @brief Static client configuration supplied to @ref actrust_mqtt_init.
+ *
+ * The string and byte buffers referenced by this structure are copied
+ * synchronously by @ref actrust_mqtt_connect. The caller may modify or release
+ * @p client_id, the transport host, the CA buffer, and the client certificate
+ * after that function returns. The copied configuration is retained while the
+ * MQTT process may reconnect.
+ *
+ * The TLS @p crypto_ctx and @p client_key handles are borrowed. MQTT does not
+ * retain, close, or deinitialize them; they must remain valid through the TLS
+ * session, process, reconnect, disconnect, and deinitialization lifecycle.
  */
 typedef struct {
     const char                     *client_id; /**< MQTT client identifier. */
@@ -172,10 +182,14 @@ actrust_err_t actrust_mqtt_set_callbacks(
  * @brief Connect to the broker.
  *
  * @param[in] mqtt Client handle.
- * @param[in] config Client configuration.
+ * @param[in] config Client configuration. String and certificate buffers are
+ *                   copied before this function returns; TLS crypto/key handles
+ *                   remain borrowed.
  *
  * @retval ACTRUST_OK Connected successfully.
- * @retval ACTRUST_ERR_INVALID_ARG @c mqtt is NULL.
+ * @retval ACTRUST_ERR_INVALID_ARG The configuration contains an invalid
+ * transport, empty client/host string, zero port, inconsistent TLS buffer
+ * length, certificate/key pairing, certificate format, or crypto context.
  * @retval ACTRUST_ERR_BAD_STATE @c mqtt is in a non-connectable state.
  * @retval ACTRUST_ERR_TIMEOUT Connect attempt exceeded its timeout.
  * @retval ACTRUST_ERR_QUEUE_FULL Internal command queue is full.
