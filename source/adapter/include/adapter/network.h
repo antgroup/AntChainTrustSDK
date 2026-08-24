@@ -195,17 +195,24 @@ actrust_err_t actrust_net_sendto(actrust_net_t net, const char *ip,
  * @brief Receive a UDP datagram and record the sender address
  *
  * @param[in]  net         Socket handle (must be UDP)
- * @param[out] ip          Buffer to receive sender IPv4 address string
- *                         (NUL-terminated).  Recommend at least 16 bytes.
- * @param[in]  ip_len      Capacity of @p ip buffer in bytes
- * @param[out] port        Receives sender port number
+ * @param[out] ip          Optional buffer to receive sender IPv4 address
+ *                         (NUL-terminated). If non-NULL, capacity must be at
+ *                         least 16 bytes.
+ * @param[in]  ip_len      Capacity of @p ip; ignored when @p ip is NULL
+ * @param[out] port        Optional sender port output; may be NULL
  * @param[out] buf         Destination buffer for datagram payload
  * @param[in]  len         Capacity of @p buf in bytes
  * @param[in]  timeout_ms  Receive timeout in milliseconds; 0 = non-blocking
- * @param[out] recvd_len   Receives the number of payload bytes actually read
+ * @param[out] recvd_len   Receives payload length on success; set to 0 after
+ *                         valid argument checking when the operation fails
+ *
+ * If the IP buffer or payload buffer is too small, the function returns
+ * @c ACTRUST_ERR_BUF_TOO_SMALL without consuming the pending datagram. Sender
+ * metadata is committed only after the complete operation succeeds.
  *
  * @return @c ACTRUST_OK on success
- * @return @c ACTRUST_ERR_INVALID_ARG if any argument is invalid
+ * @return @c ACTRUST_ERR_INVALID_ARG if any required argument is invalid
+ * @return @c ACTRUST_ERR_BUF_TOO_SMALL if an output buffer is insufficient
  * @return @c ACTRUST_ERR_TIMEOUT if the operation times out
  * @return @c ACTRUST_ERR_IO on network failure
  */
@@ -227,7 +234,8 @@ actrust_err_t actrust_net_recvfrom(actrust_net_t net, char *ip, size_t ip_len,
  * @param[out] ip          Buffer to receive the resolved IPv4 address
  *                         (NUL-terminated).  Recommend at least 16 bytes.
  * @param[in]  ip_len      Capacity of @p ip buffer in bytes
- * @param[in]  timeout_ms  Resolution timeout in milliseconds; 0 = default
+ * @param[in]  timeout_ms  Resolution timeout in milliseconds; 0 = 30-second
+ *                         platform default
  *
  * @return @c ACTRUST_OK on success
  * @return @c ACTRUST_ERR_INVALID_ARG if any argument is invalid

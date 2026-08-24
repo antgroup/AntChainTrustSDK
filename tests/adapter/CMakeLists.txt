@@ -100,6 +100,16 @@ add_executable(
     "${CMAKE_CURRENT_LIST_DIR}/network_unit_test.c"
 )
 target_link_libraries(network_adapter_unit_test PRIVATE unity adapter)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_definitions(
+        network_adapter_unit_test
+        PRIVATE ACTRUST_TEST_WRAP_CLOCK_GETTIME=1
+    )
+    target_link_options(
+        network_adapter_unit_test
+        PRIVATE "-Wl,--wrap=clock_gettime"
+    )
+endif()
 actrust_add_test(NAME network_adapter_unit_test COMMAND network_adapter_unit_test)
 set_tests_properties(
     network_adapter_unit_test

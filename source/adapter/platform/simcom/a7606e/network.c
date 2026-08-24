@@ -54,12 +54,19 @@
 #define FD_TO_ACTRUST_NET(fd)  ((actrust_net_t) (intptr_t) ((fd) + 1))
 
 typedef struct {
+    struct timespec expires;
+    bool            immediate;
+} net_deadline_t;
+
+typedef struct {
     pthread_mutex_t lock;
+    pthread_cond_t  cond;
     bool            lock_ready;
+    bool            cond_ready;
     bool            completed;
     bool            detached;
     char           *host;
-    char            ip[16];
+    char            ip[INET_ADDRSTRLEN];
     int             gai_rc;
     bool            inet_ok;
 } net_dns_resolve_ctx_t;
@@ -70,6 +77,53 @@ static bool            g_dns_resolver_active = false;
 /* ========================================================================
  * Private Helpers
  * ======================================================================== */
+
+static actrust_err_t net_deadline_start(uint32_t        timeout_ms,
+                                        net_deadline_t *deadline)
+{
+    if (deadline == NULL) {
+        return NET_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    deadline->immediate = timeout_ms == 0u;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline->expires) != 0) {
+        return NET_ERR(ACTRUST_ERR_IO);
+    }
+
+    uint64_t nsec =
+        (uint64_t) deadline->expires.tv_nsec + (uint64_t) timeout_ms * 1000000u;
+    deadline->expires.tv_sec += (time_t) (nsec / 1000000000u);
+    deadline->expires.tv_nsec = (long) (nsec % 1000000000u);
+    return ACTRUST_OK;
+}
+
+static actrust_err_t net_deadline_remaining(const net_deadline_t *deadline,
+                                            int                  *remaining_ms)
+{
+    if (deadline == NULL || remaining_ms == NULL) {
+        return NET_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    if (deadline->immediate) {
+        *remaining_ms = 0;
+        return ACTRUST_OK;
+    }
+
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return NET_ERR(ACTRUST_ERR_IO);
+    }
+
+    int64_t sec  = (int64_t) deadline->expires.tv_sec - (int64_t) now.tv_sec;
+    int64_t nsec = (int64_t) deadline->expires.tv_nsec - (int64_t) now.tv_nsec;
+    int64_t left_ns = sec * 1000000000ll + nsec;
+    if (left_ns <= 0) {
+        return NET_ERR(ACTRUST_ERR_TIMEOUT);
+    }
+
+    int64_t left_ms = left_ns / 1000000ll;
+    *remaining_ms   = left_ms > INT_MAX ? INT_MAX : (int) left_ms;
+    return ACTRUST_OK;
+}
 
 static actrust_err_t net_dns_resolver_acquire(void)
 {
@@ -101,6 +155,9 @@ static void net_dns_ctx_free(net_dns_resolve_ctx_t *ctx)
         return;
     }
 
+    if (ctx->cond_ready) {
+        (void) pthread_cond_destroy(&ctx->cond);
+    }
     if (ctx->lock_ready) {
         (void) pthread_mutex_destroy(&ctx->lock);
     }
@@ -136,6 +193,7 @@ static void *net_dns_resolve_worker(void *arg)
     if (pthread_mutex_lock(&ctx->lock) == 0) {
         ctx->completed = true;
         should_free    = ctx->detached;
+        (void) pthread_cond_broadcast(&ctx->cond);
         (void) pthread_mutex_unlock(&ctx->lock);
     }
 
@@ -148,24 +206,52 @@ static void *net_dns_resolve_worker(void *arg)
     return NULL;
 }
 
-static bool net_dns_detach_if_running(pthread_t              thread,
-                                      net_dns_resolve_ctx_t *ctx)
+static actrust_err_t net_dns_transfer_to_worker(pthread_t              thread,
+                                                net_dns_resolve_ctx_t *ctx)
 {
-    bool running = false;
+    if (pthread_mutex_lock(&ctx->lock) != 0) {
+        return NET_ERR(ACTRUST_ERR_IO);
+    }
 
-    if (pthread_mutex_lock(&ctx->lock) == 0) {
-        running = !ctx->completed;
-        if (running) {
+    bool running = !ctx->completed;
+    if (running) {
+        int rc = pthread_detach(thread);
+        if (rc == 0) {
             ctx->detached = true;
         }
         (void) pthread_mutex_unlock(&ctx->lock);
+        return rc == 0 ? ACTRUST_OK : NET_ERR(ACTRUST_ERR_IO);
     }
 
-    if (running) {
-        (void) pthread_detach(thread);
+    (void) pthread_mutex_unlock(&ctx->lock);
+    return NET_ERR(ACTRUST_ERR_BAD_STATE);
+}
+
+static actrust_err_t net_dns_wait_complete(net_dns_resolve_ctx_t *ctx,
+                                           const struct timespec *deadline)
+{
+    if (pthread_mutex_lock(&ctx->lock) != 0) {
+        return NET_ERR(ACTRUST_ERR_IO);
     }
 
-    return running;
+    int rc = 0;
+    while (!ctx->completed && rc == 0) {
+        rc = pthread_cond_timedwait(&ctx->cond, &ctx->lock, deadline);
+    }
+
+    bool completed = ctx->completed;
+    (void) pthread_mutex_unlock(&ctx->lock);
+
+    if (completed && rc == 0) {
+        int            remaining     = 0;
+        net_deadline_t wait_deadline = {
+            .expires   = *deadline,
+            .immediate = false,
+        };
+        return net_deadline_remaining(&wait_deadline, &remaining);
+    }
+    return rc == ETIMEDOUT ? NET_ERR(ACTRUST_ERR_TIMEOUT)
+                           : NET_ERR(ACTRUST_ERR_IO);
 }
 
 static actrust_err_t net_dns_copy_result(const net_dns_resolve_ctx_t *ctx,
@@ -186,9 +272,19 @@ static actrust_err_t net_dns_copy_result(const net_dns_resolve_ctx_t *ctx,
 
 /**
  * @brief Interpret poll(2) revents after a successful return (rc > 0)
+ *
+ * Error events (POLLNVAL, POLLERR) always indicate failure.  For reads,
+ * POLLHUP (peer closed) is treated as "ready" so the caller's recv()
+ * can discover EOF normally (returning 0 bytes).
+ *
+ * @param revents  The revents field from struct pollfd
+ * @param is_read  True for read-readiness, false for write-readiness
+ * @return @c ACTRUST_OK if the descriptor is ready
+ * @return @c ACTRUST_ERR_IO on error condition
  */
 static actrust_err_t net_poll_check_revents(short revents, bool is_read)
 {
+    /* POLLNVAL (bad fd) and POLLERR are always fatal */
     if (revents & (POLLNVAL | POLLERR)) {
         return NET_ERR(ACTRUST_ERR_IO);
     }
@@ -200,61 +296,64 @@ static actrust_err_t net_poll_check_revents(short revents, bool is_read)
 /**
  * @brief Wait for a file descriptor to become ready using poll()
  *
- * Handles EINTR by recalculating remaining time with monotonic clock.
+ * Handles EINTR by recalculating remaining time with monotonic clock to
+ * guarantee the total wait never exceeds @p timeout_ms.
+ *
+ * @param fd         File descriptor
+ * @param is_read    True to wait for read-readiness, false for write-readiness
+ * @param timeout_ms Timeout in milliseconds; 0 = non-blocking check
+ * @return @c ACTRUST_OK if the descriptor is ready
+ * @return @c ACTRUST_ERR_TIMEOUT on timeout (including non-blocking)
+ * @return @c ACTRUST_ERR_IO on poll error or error condition on the descriptor
  */
 static actrust_err_t actrust_net_poll_wait(int fd, bool is_read,
-                                           uint32_t timeout_ms)
+                                           const net_deadline_t *deadline)
 {
     struct pollfd pfd = {
         .fd     = fd,
         .events = is_read ? POLLIN : POLLOUT,
     };
 
-    if (timeout_ms == 0) {
-        int rc = poll(&pfd, 1, 0);
-        if (rc > 0) {
-            return net_poll_check_revents(pfd.revents, is_read);
-        }
-        return (rc == 0 || errno == EINTR) ? NET_ERR(ACTRUST_ERR_TIMEOUT)
-                                           : NET_ERR(ACTRUST_ERR_IO);
-    }
-
-    struct timespec start;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-
-    int remaining =
-        (timeout_ms > (uint32_t) INT_MAX) ? INT_MAX : (int) timeout_ms;
-
     for (;;) {
-        int rc = poll(&pfd, 1, remaining);
+        int           remaining = 0;
+        actrust_err_t err       = net_deadline_remaining(deadline, &remaining);
+        if (ACTRUST_IS_ERR(err)) {
+            return err;
+        }
 
+        int rc = poll(&pfd, 1, remaining);
         if (rc > 0) {
+            if (!deadline->immediate) {
+                err = net_deadline_remaining(deadline, &remaining);
+                if (ACTRUST_IS_ERR(err)) {
+                    return err;
+                }
+            }
             return net_poll_check_revents(pfd.revents, is_read);
         }
         if (rc == 0) {
-            return NET_ERR(ACTRUST_ERR_TIMEOUT);
+            if (deadline->immediate) {
+                return NET_ERR(ACTRUST_ERR_TIMEOUT);
+            }
+            continue;
         }
-
         if (errno != EINTR) {
             return NET_ERR(ACTRUST_ERR_IO);
         }
-
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        int64_t elapsed_ms = (int64_t) (now.tv_sec - start.tv_sec) * 1000 +
-                             (int64_t) (now.tv_nsec - start.tv_nsec) / 1000000;
-
-        if (elapsed_ms >= (int64_t) timeout_ms) {
+        if (deadline->immediate) {
             return NET_ERR(ACTRUST_ERR_TIMEOUT);
         }
-
-        int64_t left = (int64_t) timeout_ms - elapsed_ms;
-        remaining    = (left > (int64_t) INT_MAX) ? INT_MAX : (int) left;
     }
 }
 
 /**
  * @brief Set or clear O_NONBLOCK on a file descriptor
+ *
+ * @param fd         File descriptor
+ * @param enable     True to set O_NONBLOCK, false to clear
+ *
+ * @return @c true on success
+ * @return @c false on failure
  */
 static bool net_set_nonblock(int fd, bool enable)
 {
@@ -326,6 +425,7 @@ actrust_err_t actrust_net_connect(actrust_net_t net, const char *remote_ip,
 
     int fd = ACTRUST_NET_TO_FD(net);
 
+    /* Build destination address */
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -335,6 +435,13 @@ actrust_err_t actrust_net_connect(actrust_net_t net, const char *remote_ip,
         return NET_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
+    net_deadline_t deadline;
+    actrust_err_t  err = net_deadline_start(timeout_ms, &deadline);
+    if (ACTRUST_IS_ERR(err)) {
+        return err;
+    }
+
+    /* Set non-blocking for timeout-controlled connect */
     if (!net_set_nonblock(fd, true)) {
         return NET_ERR(ACTRUST_ERR_IO);
     }
@@ -346,19 +453,21 @@ actrust_err_t actrust_net_connect(actrust_net_t net, const char *remote_ip,
         return ACTRUST_OK;
     }
 
-    if (errno != EINPROGRESS) {
+    if (errno != EINPROGRESS && errno != EINTR) {
         (void) net_set_nonblock(fd, false);
         return NET_ERR(ACTRUST_ERR_IO);
     }
 
-    actrust_err_t err = actrust_net_poll_wait(fd, false, timeout_ms);
+    err = actrust_net_poll_wait(fd, false, &deadline);
 
+    /* Restore blocking mode regardless of outcome */
     (void) net_set_nonblock(fd, false);
 
     if (err != ACTRUST_OK) {
         return err;
     }
 
+    /* Verify the connection actually succeeded */
     int       so_err = 0;
     socklen_t errlen = sizeof(so_err);
 
@@ -381,27 +490,33 @@ actrust_err_t actrust_net_send(actrust_net_t net, const uint8_t *buf,
     *sent_len = 0;
     int fd    = ACTRUST_NET_TO_FD(net);
 
-    actrust_err_t err = actrust_net_poll_wait(fd, false, timeout_ms);
+    net_deadline_t deadline;
+    actrust_err_t  err = net_deadline_start(timeout_ms, &deadline);
     if (ACTRUST_IS_ERR(err)) {
         return err;
     }
 
     size_t  io_len = (len > (size_t) SSIZE_MAX) ? (size_t) SSIZE_MAX : len;
     ssize_t n;
-    do {
+    for (;;) {
+        err = actrust_net_poll_wait(fd, false, &deadline);
+        if (ACTRUST_IS_ERR(err)) {
+            return err;
+        }
         n = send(fd, buf, io_len, MSG_NOSIGNAL | MSG_DONTWAIT);
-    } while (n < 0 && errno == EINTR);
-    int send_errno = errno;
 
-    if (n < 0) {
-        if (send_errno == EAGAIN || send_errno == EWOULDBLOCK) {
-            return NET_ERR(ACTRUST_ERR_TIMEOUT);
+        if (n >= 0) {
+            *sent_len = (size_t) n;
+            return ACTRUST_OK;
+        }
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (deadline.immediate) {
+                return NET_ERR(ACTRUST_ERR_TIMEOUT);
+            }
+            continue;
         }
         return NET_ERR(ACTRUST_ERR_IO);
     }
-
-    *sent_len = (size_t) n;
-    return ACTRUST_OK;
 }
 
 actrust_err_t actrust_net_recv(actrust_net_t net, uint8_t *buf, size_t len,
@@ -414,23 +529,33 @@ actrust_err_t actrust_net_recv(actrust_net_t net, uint8_t *buf, size_t len,
     *recvd_len = 0;
     int fd     = ACTRUST_NET_TO_FD(net);
 
-    actrust_err_t err = actrust_net_poll_wait(fd, true, timeout_ms);
+    net_deadline_t deadline;
+    actrust_err_t  err = net_deadline_start(timeout_ms, &deadline);
     if (ACTRUST_IS_ERR(err)) {
         return err;
     }
 
     size_t  io_len = (len > (size_t) SSIZE_MAX) ? (size_t) SSIZE_MAX : len;
     ssize_t n;
-    do {
-        n = recv(fd, buf, io_len, 0);
-    } while (n < 0 && errno == EINTR);
+    for (;;) {
+        err = actrust_net_poll_wait(fd, true, &deadline);
+        if (ACTRUST_IS_ERR(err)) {
+            return err;
+        }
+        n = recv(fd, buf, io_len, MSG_DONTWAIT);
 
-    if (n < 0) {
+        if (n >= 0) {
+            *recvd_len = (size_t) n;
+            return ACTRUST_OK;
+        }
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (deadline.immediate) {
+                return NET_ERR(ACTRUST_ERR_TIMEOUT);
+            }
+            continue;
+        }
         return NET_ERR(ACTRUST_ERR_IO);
     }
-
-    *recvd_len = (size_t) n;
-    return ACTRUST_OK;
 }
 
 /* ========================================================================
@@ -479,24 +604,34 @@ actrust_err_t actrust_net_sendto(actrust_net_t net, const char *ip,
         return NET_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    actrust_err_t err = actrust_net_poll_wait(fd, false, timeout_ms);
+    net_deadline_t deadline;
+    actrust_err_t  err = net_deadline_start(timeout_ms, &deadline);
     if (ACTRUST_IS_ERR(err)) {
         return err;
     }
 
     size_t  io_len = (len > (size_t) SSIZE_MAX) ? (size_t) SSIZE_MAX : len;
     ssize_t n;
-    do {
-        n = sendto(fd, buf, io_len, MSG_NOSIGNAL, (struct sockaddr *) &addr,
-                   sizeof(addr));
-    } while (n < 0 && errno == EINTR);
+    for (;;) {
+        err = actrust_net_poll_wait(fd, false, &deadline);
+        if (ACTRUST_IS_ERR(err)) {
+            return err;
+        }
+        n = sendto(fd, buf, io_len, MSG_NOSIGNAL | MSG_DONTWAIT,
+                   (struct sockaddr *) &addr, sizeof(addr));
 
-    if (n < 0) {
+        if (n >= 0) {
+            *sent_len = (size_t) n;
+            return ACTRUST_OK;
+        }
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (deadline.immediate) {
+                return NET_ERR(ACTRUST_ERR_TIMEOUT);
+            }
+            continue;
+        }
         return NET_ERR(ACTRUST_ERR_IO);
     }
-
-    *sent_len = (size_t) n;
-    return ACTRUST_OK;
 }
 
 actrust_err_t actrust_net_recvfrom(actrust_net_t net, char *ip, size_t ip_len,
@@ -508,40 +643,84 @@ actrust_err_t actrust_net_recvfrom(actrust_net_t net, char *ip, size_t ip_len,
     }
 
     *recvd_len = 0;
-    int fd     = ACTRUST_NET_TO_FD(net);
+    if (ip != NULL && ip_len < INET_ADDRSTRLEN) {
+        return NET_ERR(ACTRUST_ERR_BUF_TOO_SMALL);
+    }
 
-    actrust_err_t err = actrust_net_poll_wait(fd, true, timeout_ms);
+    int            fd = ACTRUST_NET_TO_FD(net);
+    net_deadline_t deadline;
+    actrust_err_t  err = net_deadline_start(timeout_ms, &deadline);
     if (ACTRUST_IS_ERR(err)) {
         return err;
     }
 
-    size_t io_len = (len > (size_t) SSIZE_MAX) ? (size_t) SSIZE_MAX : len;
-    struct sockaddr_in addr;
-    socklen_t          addrlen = sizeof(addr);
-    memset(&addr, 0, sizeof(addr));
+    for (;;) {
+        err = actrust_net_poll_wait(fd, true, &deadline);
+        if (ACTRUST_IS_ERR(err)) {
+            return err;
+        }
 
-    ssize_t n;
-    do {
-        n = recvfrom(fd, buf, io_len, 0, (struct sockaddr *) &addr, &addrlen);
-    } while (n < 0 && errno == EINTR);
+        uint8_t            peek_byte;
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        struct iovec peek_iov = {
+            .iov_base = &peek_byte,
+            .iov_len  = sizeof(peek_byte),
+        };
+        struct msghdr peek_msg = {
+            .msg_name       = &addr,
+            .msg_namelen    = sizeof(addr),
+            .msg_iov        = &peek_iov,
+            .msg_iovlen     = 1u,
+            .msg_control    = NULL,
+            .msg_controllen = 0u,
+            .msg_flags      = 0,
+        };
 
-    if (n < 0) {
+        ssize_t datagram_len;
+        datagram_len =
+            recvmsg(fd, &peek_msg, MSG_PEEK | MSG_TRUNC | MSG_DONTWAIT);
+
+        if (datagram_len >= 0) {
+            if ((size_t) datagram_len > len) {
+                return NET_ERR(ACTRUST_ERR_BUF_TOO_SMALL);
+            }
+
+            socklen_t addrlen = sizeof(addr);
+            ssize_t   copied  = recvfrom(fd, buf, len, MSG_DONTWAIT,
+                                         (struct sockaddr *) &addr, &addrlen);
+            if (copied < 0) {
+                if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                    if (deadline.immediate) {
+                        return NET_ERR(ACTRUST_ERR_TIMEOUT);
+                    }
+                    continue;
+                }
+                return NET_ERR(ACTRUST_ERR_IO);
+            }
+
+            char local_ip[INET_ADDRSTRLEN];
+            if (ip != NULL && inet_ntop(AF_INET, &addr.sin_addr, local_ip,
+                                        sizeof(local_ip)) == NULL) {
+                return NET_ERR(ACTRUST_ERR_IO);
+            }
+            if (ip != NULL) {
+                memcpy(ip, local_ip, strlen(local_ip) + 1u);
+            }
+            if (port != NULL) {
+                *port = ntohs(addr.sin_port);
+            }
+            *recvd_len = (size_t) copied;
+            return ACTRUST_OK;
+        }
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (deadline.immediate) {
+                return NET_ERR(ACTRUST_ERR_TIMEOUT);
+            }
+            continue;
+        }
         return NET_ERR(ACTRUST_ERR_IO);
     }
-
-    if (ip != NULL && ip_len > 0) {
-        if (inet_ntop(AF_INET, &addr.sin_addr, ip, (socklen_t) ip_len) ==
-            NULL) {
-            ip[0] = '\0';
-        }
-    }
-
-    if (port != NULL) {
-        *port = ntohs(addr.sin_port);
-    }
-
-    *recvd_len = (size_t) n;
-    return ACTRUST_OK;
 }
 
 /* ========================================================================
@@ -565,16 +744,12 @@ actrust_err_t actrust_net_dns_resolve(const char *host, char *ip, size_t ip_len,
         effective_timeout = NET_DNS_DEFAULT_TIMEOUT_MS;
     }
 
-    struct timespec deadline;
-    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+    net_deadline_t deadline;
+    err = net_deadline_start(effective_timeout, &deadline);
+    if (ACTRUST_IS_ERR(err)) {
         net_dns_resolver_release();
-        return NET_ERR(ACTRUST_ERR_IO);
+        return err;
     }
-
-    uint64_t nsec =
-        (uint64_t) deadline.tv_nsec + (uint64_t) effective_timeout * 1000000u;
-    deadline.tv_sec += (time_t) (nsec / 1000000000u);
-    deadline.tv_nsec = (long) (nsec % 1000000000u);
 
     net_dns_resolve_ctx_t *ctx =
         (net_dns_resolve_ctx_t *) calloc(1, sizeof(*ctx));
@@ -599,27 +774,48 @@ actrust_err_t actrust_net_dns_resolve(const char *host, char *ip, size_t ip_len,
     }
     ctx->lock_ready = true;
 
+    pthread_condattr_t cond_attr;
+    if (pthread_condattr_init(&cond_attr) != 0) {
+        net_dns_resolver_release();
+        net_dns_ctx_free(ctx);
+        return NET_ERR(ACTRUST_ERR_IO);
+    }
+    int rc = pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
+    if (rc == 0) {
+        rc = pthread_cond_init(&ctx->cond, &cond_attr);
+    }
+    (void) pthread_condattr_destroy(&cond_attr);
+    if (rc != 0) {
+        net_dns_resolver_release();
+        net_dns_ctx_free(ctx);
+        return NET_ERR(ACTRUST_ERR_IO);
+    }
+    ctx->cond_ready = true;
+
     pthread_t thread;
-    int       rc = pthread_create(&thread, NULL, net_dns_resolve_worker, ctx);
+    rc = pthread_create(&thread, NULL, net_dns_resolve_worker, ctx);
     if (rc != 0) {
         net_dns_resolver_release();
         net_dns_ctx_free(ctx);
         return NET_ERR(ACTRUST_ERR_IO);
     }
 
-    rc = pthread_timedjoin_np(thread, NULL, &deadline);
-    if (rc == ETIMEDOUT) {
-        if (net_dns_detach_if_running(thread, ctx)) {
-            return NET_ERR(ACTRUST_ERR_TIMEOUT);
+    err = net_dns_wait_complete(ctx, &deadline.expires);
+    if (err != ACTRUST_OK) {
+        actrust_err_t transfer_err = net_dns_transfer_to_worker(thread, ctx);
+        if (transfer_err == ACTRUST_OK) {
+            return err;
         }
         rc = pthread_join(thread, NULL);
-    }
-
-    if (rc != 0) {
-        if (net_dns_detach_if_running(thread, ctx)) {
+        if (rc != 0) {
             return NET_ERR(ACTRUST_ERR_IO);
         }
-        (void) pthread_join(thread, NULL);
+        net_dns_ctx_free(ctx);
+        return err;
+    }
+
+    rc = pthread_join(thread, NULL);
+    if (rc != 0) {
         net_dns_ctx_free(ctx);
         return NET_ERR(ACTRUST_ERR_IO);
     }
