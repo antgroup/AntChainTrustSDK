@@ -45,6 +45,10 @@ static actrust_crypto_ctx_t       s_seen_crypto_ctx;
 static actrust_crypto_key_t       s_seen_client_key;
 static MQTTAgentCommandCallback_t s_connect_callback;
 static MQTTAgentCommandContext_t *s_connect_callback_context;
+static MQTTAgentCommandCallback_t s_subscribe_callback;
+static MQTTAgentCommandContext_t *s_subscribe_callback_context;
+static MQTTAgentCommandCallback_t s_unsubscribe_callback;
+static MQTTAgentCommandContext_t *s_unsubscribe_callback_context;
 static bool                       s_hold_command_loop;
 static actrust_sem_t              s_command_loop_entered;
 static actrust_sem_t              s_command_loop_release;
@@ -66,6 +70,8 @@ typedef struct test_alloc_node {
 static test_alloc_node_t *s_allocations;
 
 static void test_complete_connect(MQTTStatus_t status);
+static void test_complete_subscribe(MQTTStatus_t status, uint8_t *suback);
+static void test_complete_unsubscribe(MQTTStatus_t status);
 
 extern void *__real_actrust_calloc(size_t nmemb, size_t size);
 extern void  __real_actrust_free(void *ptr);
@@ -247,6 +253,30 @@ MQTTStatus_t __wrap_MQTTAgent_Disconnect(
     return MQTTSuccess;
 }
 
+MQTTStatus_t __wrap_MQTTAgent_Subscribe(
+    const MQTTAgentContext_t *agent, MQTTAgentSubscribeArgs_t *args,
+    const MQTTAgentCommandInfo_t *command_info)
+{
+    (void) agent;
+    TEST_ASSERT_NOT_NULL(args);
+    TEST_ASSERT_NOT_NULL(command_info);
+    s_subscribe_callback         = command_info->cmdCompleteCallback;
+    s_subscribe_callback_context = command_info->pCmdCompleteCallbackContext;
+    return MQTTSuccess;
+}
+
+MQTTStatus_t __wrap_MQTTAgent_Unsubscribe(
+    const MQTTAgentContext_t *agent, MQTTAgentSubscribeArgs_t *args,
+    const MQTTAgentCommandInfo_t *command_info)
+{
+    (void) agent;
+    TEST_ASSERT_NOT_NULL(args);
+    TEST_ASSERT_NOT_NULL(command_info);
+    s_unsubscribe_callback         = command_info->cmdCompleteCallback;
+    s_unsubscribe_callback_context = command_info->pCmdCompleteCallbackContext;
+    return MQTTSuccess;
+}
+
 MQTTStatus_t __wrap_MQTTAgent_CommandLoop(MQTTAgentContext_t *agent)
 {
     (void) agent;
@@ -269,6 +299,31 @@ static void test_complete_connect(MQTTStatus_t status)
     s_connect_callback_context = NULL;
 }
 
+static void test_complete_subscribe(MQTTStatus_t status, uint8_t *suback)
+{
+    MQTTAgentReturnInfo_t return_info = {
+        .returnCode   = status,
+        .pSubackCodes = suback,
+    };
+    TEST_ASSERT_NOT_NULL(s_subscribe_callback);
+    MQTTAgentCommandCallback_t callback = s_subscribe_callback;
+    MQTTAgentCommandContext_t *context  = s_subscribe_callback_context;
+    s_subscribe_callback                = NULL;
+    s_subscribe_callback_context        = NULL;
+    callback(context, &return_info);
+}
+
+static void test_complete_unsubscribe(MQTTStatus_t status)
+{
+    MQTTAgentReturnInfo_t return_info = { .returnCode = status };
+    TEST_ASSERT_NOT_NULL(s_unsubscribe_callback);
+    MQTTAgentCommandCallback_t callback = s_unsubscribe_callback;
+    MQTTAgentCommandContext_t *context  = s_unsubscribe_callback_context;
+    s_unsubscribe_callback              = NULL;
+    s_unsubscribe_callback_context      = NULL;
+    callback(context, &return_info);
+}
+
 static void test_reset_wrapped_state(void)
 {
     s_caller_client_id = NULL;
@@ -280,20 +335,24 @@ static void test_reset_wrapped_state(void)
     memset(s_seen_host, 0, sizeof(s_seen_host));
     memset(s_seen_ca, 0, sizeof(s_seen_ca));
     memset(s_seen_cert, 0, sizeof(s_seen_cert));
-    s_seen_ca_len              = 0u;
-    s_seen_cert_len            = 0u;
-    s_seen_crypto_ctx          = NULL;
-    s_seen_client_key          = NULL;
-    s_connect_callback         = NULL;
-    s_connect_callback_context = NULL;
-    s_hold_command_loop        = false;
-    s_hold_owned_allocation    = false;
-    s_owned_allocation_entered = NULL;
-    s_owned_allocation_release = NULL;
-    s_alloc_call_count         = 0u;
-    s_fail_alloc_call          = 0u;
-    s_track_allocations        = false;
-    s_free_saw_nonzero         = false;
+    s_seen_ca_len                  = 0u;
+    s_seen_cert_len                = 0u;
+    s_seen_crypto_ctx              = NULL;
+    s_seen_client_key              = NULL;
+    s_connect_callback             = NULL;
+    s_connect_callback_context     = NULL;
+    s_subscribe_callback           = NULL;
+    s_subscribe_callback_context   = NULL;
+    s_unsubscribe_callback         = NULL;
+    s_unsubscribe_callback_context = NULL;
+    s_hold_command_loop            = false;
+    s_hold_owned_allocation        = false;
+    s_owned_allocation_entered     = NULL;
+    s_owned_allocation_release     = NULL;
+    s_alloc_call_count             = 0u;
+    s_fail_alloc_call              = 0u;
+    s_track_allocations            = false;
+    s_free_saw_nonzero             = false;
     TEST_ASSERT_EQUAL_size_t(0u, s_tracked_alloc_count);
     TEST_ASSERT_NULL(s_allocations);
     TEST_ASSERT_EQUAL(ACTRUST_OK,
@@ -556,6 +615,48 @@ static actrust_mqtt_config_t test_tls_config(char *client_id, char *host,
     return config;
 }
 
+static void test_connect_tcp(void)
+{
+    static char           client_id[] = TEST_CLIENT_ID;
+    static char           host[]      = TEST_TCP_HOST;
+    actrust_mqtt_config_t config      = test_tcp_config(client_id, host);
+    s_caller_client_id                = client_id;
+    s_caller_host                     = host;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mqtt_connect(mqtt, &config));
+}
+
+void test_subscription_commits_on_ack(void)
+{
+    uint8_t suback = MQTTSubAckSuccessQos0;
+    test_connect_tcp();
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mqtt_subscribe(mqtt, "topic/a"));
+    TEST_ASSERT_EQUAL(
+        ACTRUST_ERR_ALREADY,
+        ACTRUST_ERR_CODE(actrust_mqtt_subscribe(mqtt, "topic/a")));
+    test_complete_subscribe(MQTTSuccess, &suback);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mqtt_unsubscribe(mqtt, "topic/a"));
+    test_complete_unsubscribe(MQTTSuccess);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mqtt_disconnect(mqtt));
+}
+
+void test_subscription_rolls_back_on_rejection(void)
+{
+    uint8_t suback = MQTTSubAckFailure;
+    test_connect_tcp();
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mqtt_subscribe(mqtt, "topic/b"));
+    test_complete_subscribe(MQTTSuccess, &suback);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mqtt_subscribe(mqtt, "topic/b"));
+    test_complete_subscribe(MQTTSuccess, NULL);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mqtt_subscribe(mqtt, "topic/b"));
+    suback = MQTTSubAckSuccessQos0;
+    test_complete_subscribe(MQTTSuccess, &suback);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mqtt_unsubscribe(mqtt, "topic/b"));
+    test_complete_unsubscribe(MQTTRecvFailed);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mqtt_unsubscribe(mqtt, "topic/b"));
+    test_complete_unsubscribe(MQTTSuccess);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mqtt_disconnect(mqtt));
+}
+
 void test_connect_owns_tcp_strings(void)
 {
     char                  client_id[] = TEST_CLIENT_ID;
@@ -742,6 +843,8 @@ int main(void)
 #ifdef ACTRUST_TEST_WRAP_MQTT_OWNERSHIP
     RUN_TEST(test_connect_owns_tcp_strings);
     RUN_TEST(test_connect_owns_tls_buffers_and_borrows_handles);
+    RUN_TEST(test_subscription_commits_on_ack);
+    RUN_TEST(test_subscription_rolls_back_on_rejection);
     RUN_TEST(test_connect_rejects_invalid_config);
     RUN_TEST(test_connect_rejects_replacement_while_process_runs);
     RUN_TEST(test_connect_reserves_lifecycle_against_deinit);

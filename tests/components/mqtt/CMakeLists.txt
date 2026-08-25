@@ -82,6 +82,8 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
             "-Wl,--wrap=actrust_net_close"
             "-Wl,--wrap=MQTTAgent_Connect"
             "-Wl,--wrap=MQTTAgent_Disconnect"
+            "-Wl,--wrap=MQTTAgent_Subscribe"
+            "-Wl,--wrap=MQTTAgent_Unsubscribe"
             "-Wl,--wrap=MQTTAgent_CommandLoop"
     )
 endif()

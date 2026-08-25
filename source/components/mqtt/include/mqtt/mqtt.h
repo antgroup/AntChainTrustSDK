@@ -220,7 +220,7 @@ actrust_err_t actrust_mqtt_disconnect(actrust_mqtt_t mqtt);
  * @param[in] mqtt Client handle.
  * @param[in] message Publish message.
  *
- * @retval ACTRUST_OK Message published successfully (in the transmit queue).
+ * @retval ACTRUST_OK Message command was accepted and queued.
  * @retval ACTRUST_ERR_BAD_STATE Client is not connected.
  * @retval ACTRUST_ERR_INVALID_ARG Invalid arguments.
  * @retval ACTRUST_ERR_QUEUE_FULL Internal transmit queue is full.
@@ -237,7 +237,8 @@ actrust_err_t actrust_mqtt_publish(actrust_mqtt_t                mqtt,
  * @param[in] mqtt Client handle.
  * @param[in] topic Topic name.
  *
- * @retval ACTRUST_OK Subscription request accepted.
+ * @retval ACTRUST_OK Subscription command was accepted and queued; a successful
+ *                   SUBACK commits the subscription.
  * @retval ACTRUST_ERR_BAD_STATE Client is not connected.
  * @retval ACTRUST_ERR_INVALID_ARG Invalid arguments.
  * @retval ACTRUST_ERR_NO_MEM Memory allocation failed.
@@ -250,7 +251,8 @@ actrust_err_t actrust_mqtt_subscribe(actrust_mqtt_t mqtt, const char *topic);
  * @param[in] mqtt Client handle.
  * @param[in] topic Topic name.
  *
- * @retval ACTRUST_OK Unsubscription request accepted.
+ * @retval ACTRUST_OK Unsubscription command was accepted and queued; a
+ *                   successful UNSUBACK removes the subscription.
  * @retval ACTRUST_ERR_BAD_STATE Client is not connected.
  * @retval ACTRUST_ERR_INVALID_ARG Invalid arguments.
  * @retval ACTRUST_ERR_NO_MEM Memory allocation failed.
