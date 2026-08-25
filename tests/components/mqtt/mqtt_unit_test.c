@@ -49,6 +49,8 @@ static MQTTAgentCommandCallback_t s_subscribe_callback;
 static MQTTAgentCommandContext_t *s_subscribe_callback_context;
 static MQTTAgentCommandCallback_t s_unsubscribe_callback;
 static MQTTAgentCommandContext_t *s_unsubscribe_callback_context;
+static bool                       s_invoke_incoming_callback;
+static actrust_err_t              s_callback_deinit_result;
 static bool                       s_hold_command_loop;
 static actrust_sem_t              s_command_loop_entered;
 static actrust_sem_t              s_command_loop_release;
@@ -72,6 +74,16 @@ static test_alloc_node_t *s_allocations;
 static void test_complete_connect(MQTTStatus_t status);
 static void test_complete_subscribe(MQTTStatus_t status, uint8_t *suback);
 static void test_complete_unsubscribe(MQTTStatus_t status);
+
+static void test_on_message(void                         *user_ctx,
+                            const actrust_mqtt_message_t *message)
+{
+    (void) user_ctx;
+    TEST_ASSERT_NOT_NULL(message);
+    if (s_invoke_incoming_callback == true) {
+        s_callback_deinit_result = actrust_mqtt_deinit(mqtt);
+    }
+}
 
 extern void *__real_actrust_calloc(size_t nmemb, size_t size);
 extern void  __real_actrust_free(void *ptr);
@@ -285,6 +297,19 @@ MQTTStatus_t __wrap_MQTTAgent_CommandLoop(MQTTAgentContext_t *agent)
         TEST_ASSERT_EQUAL(ACTRUST_OK,
                           actrust_sem_wait(s_command_loop_release, 1000u));
     }
+    if (s_invoke_incoming_callback == true) {
+        static uint8_t    payload[] = { 0x01u };
+        MQTTPublishInfo_t publish   = {
+              .pTopicName      = "topic",
+              .topicNameLength = 5u,
+              .pPayload        = payload,
+              .payloadLength   = sizeof(payload),
+              .qos             = MQTTQoS0,
+        };
+        TEST_ASSERT_NOT_NULL(agent->pIncomingCallback);
+        agent->pIncomingCallback(agent, 1u, &publish);
+        s_invoke_incoming_callback = false;
+    }
     return MQTTSuccess;
 }
 
@@ -345,6 +370,8 @@ static void test_reset_wrapped_state(void)
     s_subscribe_callback_context   = NULL;
     s_unsubscribe_callback         = NULL;
     s_unsubscribe_callback_context = NULL;
+    s_invoke_incoming_callback     = false;
+    s_callback_deinit_result       = ACTRUST_OK;
     s_hold_command_loop            = false;
     s_hold_owned_allocation        = false;
     s_owned_allocation_entered     = NULL;
@@ -370,6 +397,20 @@ typedef struct {
     actrust_mqtt_t mqtt;
     actrust_sem_t  returned_sem;
 } mqtt_unit_process_arg_t;
+
+typedef struct {
+    actrust_mqtt_t mqtt;
+    actrust_sem_t  returned_sem;
+    actrust_err_t  result;
+} mqtt_unit_deinit_arg_t;
+
+static void mqtt_unit_deinit_task(void *arg)
+{
+    mqtt_unit_deinit_arg_t *deinit_arg = (mqtt_unit_deinit_arg_t *) arg;
+
+    deinit_arg->result = actrust_mqtt_deinit(deinit_arg->mqtt);
+    (void) actrust_sem_post(deinit_arg->returned_sem);
+}
 
 typedef struct {
     actrust_mqtt_t               mqtt;
@@ -429,6 +470,36 @@ void tearDown(void)
         s_owned_allocation_release = NULL;
     }
 #endif
+}
+
+void test_deinit_rejects_callback_reentry(void)
+{
+    actrust_mqtt_callbacks_t callbacks = {
+        .on_message = test_on_message,
+        .user_ctx   = NULL,
+    };
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mqtt_set_callbacks(mqtt, &callbacks));
+    s_invoke_incoming_callback = true;
+
+    actrust_task_t          task         = NULL;
+    actrust_sem_t           returned_sem = NULL;
+    mqtt_unit_process_arg_t arg;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_create(&returned_sem, 0u));
+    arg.mqtt            = mqtt;
+    arg.returned_sem    = returned_sem;
+    s_hold_command_loop = true;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_task_create(&task, "mqtt_callback",
+                                                      mqtt_unit_process_task,
+                                                      &arg, 0u, 0u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_sem_wait(s_command_loop_entered, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_post(s_command_loop_release));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_wait(returned_sem, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_task_join(task, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_BAD_STATE,
+                      ACTRUST_ERR_CODE(s_callback_deinit_result));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_destroy(returned_sem));
 }
 
 void test_init_null(void)
@@ -826,6 +897,7 @@ int main(void)
     RUN_TEST(test_init_success);
     RUN_TEST(test_deinit_null);
     RUN_TEST(test_deinit_stops_running_process);
+    RUN_TEST(test_deinit_rejects_callback_reentry);
     RUN_TEST(test_set_callbacks_null_handle);
     RUN_TEST(test_set_callbacks_success);
     RUN_TEST(test_connect_null_handle);

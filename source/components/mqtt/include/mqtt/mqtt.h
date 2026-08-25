@@ -107,6 +107,11 @@ typedef struct {
 /**
  * @brief Callback invoked for inbound messages.
  *
+ * The topic and payload pointers are borrowed views into coreMQTT storage and
+ * are valid only while this callback is executing. Copy them before retaining
+ * or queueing them. The callback runs synchronously on the task executing
+ * @ref actrust_mqtt_process.
+ *
  * @param[in] user_ctx User context configured in @ref actrust_mqtt_callbacks_t.
  * @param[in] message  Inbound MQTT message.
  */
@@ -156,6 +161,11 @@ actrust_err_t actrust_mqtt_init(actrust_mqtt_t *out_mqtt);
  * If the process loop is still running after the client has left
  * CONNECTED/CONNECTING state, this function requests loop termination and
  * waits for @ref actrust_mqtt_process to return before releasing resources.
+ * Once shutdown begins, new API calls are rejected. A timeout or teardown
+ * failure leaves the handle and its resources intact so the caller may retry.
+ * The caller owns and joins the upper-layer task that runs the process loop.
+ * Calling deinit from an active message callback is invalid and returns
+ * @c ACTRUST_ERR_BAD_STATE.
  *
  * @param[in] mqtt Client handle.
  *
