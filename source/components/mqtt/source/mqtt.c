@@ -2005,6 +2005,7 @@ actrust_err_t actrust_mqtt_deinit(actrust_mqtt_t mqtt)
     if (mqtt->lock != NULL) {
         err = actrust_mutex_destroy(mqtt->lock);
         if (err != ACTRUST_OK) {
+            mqtt_deinit_abort(mqtt);
             return err;
         }
         mqtt->lock = NULL;
@@ -2100,8 +2101,11 @@ actrust_err_t actrust_mqtt_connect(actrust_mqtt_t               mqtt,
                                        ACTRUST_MQTT_CONNECT_WAIT_TIMEOUT_MS);
     if (err != ACTRUST_OK) {
         mqtt_cancel_connect_attempt(mqtt, connect_generation);
-        mqtt_wait_for_command_claim(mqtt, ACTRUST_MQTT_CONNECT_WAIT_TIMEOUT_MS);
-        mqtt_transport_close(mqtt);
+        actrust_err_t claim_err = mqtt_wait_for_command_claim(
+            mqtt, ACTRUST_MQTT_CONNECT_WAIT_TIMEOUT_MS);
+        if (claim_err == ACTRUST_OK) {
+            mqtt_transport_close(mqtt);
+        }
         mqtt_api_leave(mqtt);
         return err;
     }
@@ -2143,8 +2147,11 @@ actrust_err_t actrust_mqtt_disconnect(actrust_mqtt_t mqtt)
         mqtt, generation, CONFIG_ACTRUST_MQTT_CONNECT_TIMEOUT_MS);
     if (err != ACTRUST_OK) {
         mqtt_abort_disconnect(mqtt, generation);
-        mqtt_wait_for_command_claim(mqtt, ACTRUST_MQTT_CONNECT_WAIT_TIMEOUT_MS);
-        mqtt_transport_close(mqtt);
+        actrust_err_t claim_err = mqtt_wait_for_command_claim(
+            mqtt, ACTRUST_MQTT_CONNECT_WAIT_TIMEOUT_MS);
+        if (claim_err == ACTRUST_OK) {
+            mqtt_transport_close(mqtt);
+        }
     }
     mqtt_api_leave(mqtt);
     return err;
@@ -2155,6 +2162,14 @@ actrust_err_t actrust_mqtt_publish(actrust_mqtt_t                mqtt,
 {
     if (mqtt == NULL || message == NULL || message->topic == NULL) {
         return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    if (message->topic_len == 0u) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    if (message->topic_len >= ACTRUST_MQTT_TOPIC_MAX_LEN ||
+        message->payload_len > CONFIG_ACTRUST_MQTT_PAYLOAD_MAX_LEN) {
+        return MQTT_ERR(ACTRUST_ERR_BUF_TOO_SMALL);
     }
 
     if (message->payload == NULL && message->payload_len > 0u) {

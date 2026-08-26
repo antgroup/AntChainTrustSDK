@@ -612,6 +612,43 @@ void test_publish_rejects_null_payload_with_nonzero_len(void)
     TEST_ASSERT_EQUAL(ACTRUST_ERR_INVALID_ARG, ACTRUST_ERR_CODE(err));
 }
 
+void test_publish_rejects_oversized_lengths(void)
+{
+    char                   topic[TEST_MQTT_TOPIC_MAX_LEN + 1u];
+    actrust_mqtt_message_t message = {
+        .topic       = topic,
+        .topic_len   = TEST_MQTT_TOPIC_MAX_LEN,
+        .payload     = (uint8_t *) "p",
+        .payload_len = 1u,
+        .qos         = ACTRUST_MQTT_QOS0,
+    };
+    memset(topic, 'a', sizeof(topic));
+    topic[sizeof(topic) - 1u] = '\0';
+
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_BUF_TOO_SMALL,
+                      ACTRUST_ERR_CODE(actrust_mqtt_publish(mqtt, &message)));
+
+    message.topic_len   = 1u;
+    message.topic       = "t";
+    message.payload_len = CONFIG_ACTRUST_MQTT_PAYLOAD_MAX_LEN + 1u;
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_BUF_TOO_SMALL,
+                      ACTRUST_ERR_CODE(actrust_mqtt_publish(mqtt, &message)));
+}
+
+void test_publish_rejects_empty_topic(void)
+{
+    actrust_mqtt_message_t message = {
+        .topic       = "",
+        .topic_len   = 0u,
+        .payload     = (uint8_t *) "p",
+        .payload_len = 1u,
+        .qos         = ACTRUST_MQTT_QOS0,
+    };
+
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_INVALID_ARG,
+                      ACTRUST_ERR_CODE(actrust_mqtt_publish(mqtt, &message)));
+}
+
 void test_subscribe_null_handle(void)
 {
     TEST_ASSERT_NOT_EQUAL(ACTRUST_OK, actrust_mqtt_subscribe(NULL, "topic"));
@@ -905,6 +942,8 @@ int main(void)
     RUN_TEST(test_publish_null_handle);
     RUN_TEST(test_publish_before_connect);
     RUN_TEST(test_publish_rejects_null_payload_with_nonzero_len);
+    RUN_TEST(test_publish_rejects_oversized_lengths);
+    RUN_TEST(test_publish_rejects_empty_topic);
     RUN_TEST(test_subscribe_null_handle);
     RUN_TEST(test_subscribe_null_topic);
     RUN_TEST(test_unsubscribe_null_handle);
