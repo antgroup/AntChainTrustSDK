@@ -1065,38 +1065,76 @@ static actrust_err_t actrust_cloud_aws_deinit(actrust_cloud_t cloud)
     actrust_cloud_aws_ctx_t *aws_ctx =
         (actrust_cloud_aws_ctx_t *) cloud->provider_ctx;
     if (aws_ctx == NULL) {
-        return CLOUD_ERR(ACTRUST_ERR_BAD_STATE);
+        return ACTRUST_OK;
+    }
+
+    actrust_err_t first_err = ACTRUST_OK;
+    if (aws_ctx->mqtt_process_task != NULL) {
+        actrust_err_t ret = actrust_cloud_aws_join_mqtt_process(aws_ctx, true);
+        if (ret != ACTRUST_OK) {
+            first_err = ret;
+        }
+        if (aws_ctx->mqtt_process_task != NULL) {
+            return first_err;
+        }
     }
 
     if (aws_ctx->mqtt_client != NULL) {
-        actrust_err_t ret = actrust_cloud_aws_join_mqtt_process(aws_ctx, true);
-        if (ret != ACTRUST_OK && aws_ctx->mqtt_process_task != NULL) {
+        actrust_err_t ret = actrust_mqtt_deinit(aws_ctx->mqtt_client);
+        if (ret != ACTRUST_OK) {
             return ret;
         }
-        (void) actrust_mqtt_deinit(aws_ctx->mqtt_client);
-    }
-
-    if (aws_ctx->mutex != NULL) {
-        (void) actrust_mutex_destroy(aws_ctx->mutex);
-    }
-
-    if (aws_ctx->phase_sem != NULL) {
-        (void) actrust_sem_destroy(aws_ctx->phase_sem);
+        aws_ctx->mqtt_client = NULL;
     }
 
     if (aws_ctx->client_key != NULL) {
-        (void) actrust_crypto_key_close(aws_ctx->crypto_ctx,
-                                        &aws_ctx->client_key);
+        actrust_err_t ret =
+            actrust_crypto_key_close(aws_ctx->crypto_ctx, &aws_ctx->client_key);
+        if (ret != ACTRUST_OK) {
+            if (first_err == ACTRUST_OK) {
+                first_err = ret;
+            }
+        }
     }
 
-    if (aws_ctx->crypto_ctx != NULL) {
-        (void) actrust_crypto_deinit(&aws_ctx->crypto_ctx);
+    if (aws_ctx->mutex != NULL) {
+        actrust_err_t ret = actrust_mutex_destroy(aws_ctx->mutex);
+        if (ret == ACTRUST_OK) {
+            aws_ctx->mutex = NULL;
+        } else if (first_err == ACTRUST_OK) {
+            first_err = ret;
+        }
+    }
+
+    if (aws_ctx->phase_sem != NULL) {
+        actrust_err_t ret = actrust_sem_destroy(aws_ctx->phase_sem);
+        if (ret == ACTRUST_OK) {
+            aws_ctx->phase_sem = NULL;
+        } else if (first_err == ACTRUST_OK) {
+            first_err = ret;
+        }
+    }
+
+    if (aws_ctx->client_key == NULL && aws_ctx->crypto_ctx != NULL) {
+        actrust_err_t ret = actrust_crypto_deinit(&aws_ctx->crypto_ctx);
+        if (ret != ACTRUST_OK) {
+            if (first_err == ACTRUST_OK) {
+                first_err = ret;
+            }
+        }
+    }
+
+    if (aws_ctx->mqtt_process_task != NULL || aws_ctx->mqtt_client != NULL ||
+        aws_ctx->client_key != NULL || aws_ctx->crypto_ctx != NULL ||
+        aws_ctx->mutex != NULL || aws_ctx->phase_sem != NULL) {
+        return first_err == ACTRUST_OK ? CLOUD_ERR(ACTRUST_ERR_BUSY)
+                                       : first_err;
     }
 
     actrust_secure_zeroize(aws_ctx, sizeof(*aws_ctx));
     ACTRUST_FREE(aws_ctx);
     cloud->provider_ctx = NULL;
-    return ACTRUST_OK;
+    return first_err;
 }
 
 static actrust_err_t actrust_cloud_aws_connect(actrust_cloud_t cloud)

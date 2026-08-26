@@ -124,10 +124,10 @@ void test_cloud_main_flow(void)
     }
 
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_cloud_disconnect(cloud));
+    g_cloud_test_downlink_running = false;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_task_join(downlink_task, 1000u));
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_cloud_deinit(cloud));
     cloud = NULL;
-
-    g_cloud_test_downlink_running = false;
 }
 
 int main(void)

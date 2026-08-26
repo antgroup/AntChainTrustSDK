@@ -94,6 +94,11 @@ actrust_err_t actrust_cloud_init(actrust_cloud_provider_t provider,
 /**
  * @brief Deinitialize cloud context and release all resources.
  *
+ * The caller must stop and join every task that consumes the downlink queue
+ * returned by @ref actrust_cloud_init before calling this function. Queue
+ * destruction does not own or join external consumer tasks. If provider or
+ * queue teardown fails, the cloud handle remains owned by the caller and the
+ * caller must follow the returned handle/queue ownership state before retrying.
  * @param[in] cloud Cloud handle.
  *
  * @retval ACTRUST_OK Deinitialization succeeded.

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /* C standard */
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -54,9 +55,40 @@ static void queue_waiter_task(void *arg)
 
 static actrust_queue_t queue;
 
+#ifdef ACTRUST_TEST_WRAP_QUEUE_TEARDOWN
+static bool          s_fail_sem_destroy;
+static bool          s_fail_mutex_destroy;
+extern actrust_err_t __real_actrust_sem_destroy(actrust_sem_t sem);
+extern actrust_err_t __real_actrust_mutex_destroy(actrust_mutex_t mutex);
+
+actrust_err_t __wrap_actrust_sem_destroy(actrust_sem_t sem)
+{
+    if (s_fail_sem_destroy == true) {
+        s_fail_sem_destroy = false;
+        return ACTRUST_ERR(ACTRUST_ERR_MODULE_ADAPTER_SYSTEM,
+                           ACTRUST_ERR_HW_FAILURE);
+    }
+    return __real_actrust_sem_destroy(sem);
+}
+
+actrust_err_t __wrap_actrust_mutex_destroy(actrust_mutex_t mutex)
+{
+    if (s_fail_mutex_destroy == true) {
+        s_fail_mutex_destroy = false;
+        return ACTRUST_ERR(ACTRUST_ERR_MODULE_ADAPTER_SYSTEM,
+                           ACTRUST_ERR_HW_FAILURE);
+    }
+    return __real_actrust_mutex_destroy(mutex);
+}
+#endif
+
 void setUp(void)
 {
     queue = NULL;
+#ifdef ACTRUST_TEST_WRAP_QUEUE_TEARDOWN
+    s_fail_sem_destroy   = false;
+    s_fail_mutex_destroy = false;
+#endif
 }
 
 void tearDown(void)
@@ -112,6 +144,38 @@ void test_destroy_sets_null(void)
                       actrust_queue_create(&queue, 2u, sizeof(int)));
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_destroy(&queue));
     TEST_ASSERT_NULL(queue);
+}
+
+void test_destroy_retries_after_semaphore_failure(void)
+{
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_queue_create(&queue, 2u, sizeof(int)));
+#ifdef ACTRUST_TEST_WRAP_QUEUE_TEARDOWN
+    s_fail_sem_destroy = true;
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_HW_FAILURE,
+                      ACTRUST_ERR_CODE(actrust_queue_destroy(&queue)));
+    TEST_ASSERT_NOT_NULL(queue);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_destroy(&queue));
+    TEST_ASSERT_NULL(queue);
+#else
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_destroy(&queue));
+#endif
+}
+
+void test_destroy_retries_after_mutex_failure(void)
+{
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_queue_create(&queue, 2u, sizeof(int)));
+#ifdef ACTRUST_TEST_WRAP_QUEUE_TEARDOWN
+    s_fail_mutex_destroy = true;
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_HW_FAILURE,
+                      ACTRUST_ERR_CODE(actrust_queue_destroy(&queue)));
+    TEST_ASSERT_NOT_NULL(queue);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_destroy(&queue));
+    TEST_ASSERT_NULL(queue);
+#else
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_queue_destroy(&queue));
+#endif
 }
 
 void test_close_is_idempotent(void)
@@ -374,6 +438,8 @@ int main(void)
     RUN_TEST(test_destroy_null_handle);
     RUN_TEST(test_destroy_null_contents);
     RUN_TEST(test_destroy_sets_null);
+    RUN_TEST(test_destroy_retries_after_semaphore_failure);
+    RUN_TEST(test_destroy_retries_after_mutex_failure);
     RUN_TEST(test_close_is_idempotent);
     RUN_TEST(test_close_rejects_operations);
     RUN_TEST(test_close_wakes_blocked_push);

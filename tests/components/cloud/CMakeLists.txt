@@ -68,5 +68,18 @@ set(CLOUD_AWS_INCLUDE_DIR
     "${CMAKE_SOURCE_DIR}/source/components/cloud/source/provider/aws/include"
 )
 target_include_directories(cloud_unit_test PRIVATE "${CLOUD_AWS_INCLUDE_DIR}")
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_definitions(
+        cloud_unit_test
+        PRIVATE ACTRUST_TEST_WRAP_CLOUD_TEARDOWN=1
+    )
+    target_link_options(
+        cloud_unit_test
+        PRIVATE
+            "-Wl,--wrap=actrust_mqtt_deinit"
+            "-Wl,--wrap=actrust_queue_destroy"
+            "-Wl,--wrap=actrust_task_join"
+    )
+endif()
 actrust_add_test(NAME cloud_unit_test COMMAND cloud_unit_test)
 set_tests_properties(cloud_unit_test PROPERTIES LABELS "actrust;component;unit")

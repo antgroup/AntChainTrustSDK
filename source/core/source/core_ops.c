@@ -564,9 +564,19 @@ actrust_err_t core_ops_deinit(actrust_job_t *job)
         ctx->sign_key = NULL;
     }
 
-    (void) actrust_cloud_deinit(ctx->cloud);
-    ctx->cloud          = NULL;
-    ctx->downlink_queue = NULL;
+    if (ctx->cloud != NULL) {
+        actrust_err_t cloud_err = actrust_cloud_deinit(ctx->cloud);
+        if (cloud_err != ACTRUST_OK) {
+            LOG_WARN("cloud deinit during deinit failed: 0x%08" PRIx32,
+                     cloud_err);
+            if (ACTRUST_IS_OK(err)) {
+                err = cloud_err;
+            }
+        } else {
+            ctx->cloud          = NULL;
+            ctx->downlink_queue = NULL;
+        }
+    }
 
     (void) actrust_ntp_deinit(ctx->ntp);
     ctx->ntp = NULL;

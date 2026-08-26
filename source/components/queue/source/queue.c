@@ -293,49 +293,67 @@ actrust_err_t actrust_queue_destroy(actrust_queue_t *queue)
         return QUEUE_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    actrust_queue_t q   = *queue;
-    actrust_err_t   err = actrust_queue_close(q);
-    if (err != ACTRUST_OK) {
-        return err;
+    actrust_queue_t q         = *queue;
+    actrust_err_t   first_err = ACTRUST_OK;
+
+    if (q->state_lock != NULL) {
+        first_err = actrust_queue_close(q);
+        if (first_err != ACTRUST_OK) {
+            return first_err;
+        }
     }
 
     if (q->empty_slots != NULL) {
-        err = actrust_sem_destroy(q->empty_slots);
+        actrust_err_t err = actrust_sem_destroy(q->empty_slots);
         if (err != ACTRUST_OK) {
-            return err;
+            first_err = err;
+        } else {
+            q->empty_slots = NULL;
         }
-        q->empty_slots = NULL;
     }
 
     if (q->filled_slots != NULL) {
-        err = actrust_sem_destroy(q->filled_slots);
+        actrust_err_t err = actrust_sem_destroy(q->filled_slots);
         if (err != ACTRUST_OK) {
-            return err;
+            if (first_err == ACTRUST_OK) {
+                first_err = err;
+            }
+        } else {
+            q->filled_slots = NULL;
         }
-        q->filled_slots = NULL;
     }
 
     if (q->state_lock != NULL) {
-        err = actrust_mutex_lock(q->state_lock);
-        if (err != ACTRUST_OK) {
-            return err;
+        actrust_err_t err = actrust_mutex_lock(q->state_lock);
+        if (err == ACTRUST_OK) {
+            q->state = ACTRUST_QUEUE_STATE_CLOSED;
+            (void) actrust_mutex_unlock(q->state_lock);
+            err = actrust_mutex_destroy(q->state_lock);
         }
-        q->state = ACTRUST_QUEUE_STATE_CLOSED;
-        (void) actrust_mutex_unlock(q->state_lock);
-
-        err = actrust_mutex_destroy(q->state_lock);
         if (err != ACTRUST_OK) {
-            return err;
+            if (first_err == ACTRUST_OK) {
+                first_err = err;
+            }
+        } else {
+            q->state_lock = NULL;
         }
-        q->state_lock = NULL;
     }
 
     if (q->lock != NULL) {
-        err = actrust_mutex_destroy(q->lock);
+        actrust_err_t err = actrust_mutex_destroy(q->lock);
         if (err != ACTRUST_OK) {
-            return err;
+            if (first_err == ACTRUST_OK) {
+                first_err = err;
+            }
+        } else {
+            q->lock = NULL;
         }
-        q->lock = NULL;
+    }
+
+    if (first_err != ACTRUST_OK || q->empty_slots != NULL ||
+        q->filled_slots != NULL || q->state_lock != NULL || q->lock != NULL) {
+        return first_err == ACTRUST_OK ? QUEUE_ERR(ACTRUST_ERR_BUSY)
+                                       : first_err;
     }
 
     ACTRUST_FREE(q->buffer);
