@@ -100,7 +100,11 @@ actrust_err_t actrust_init(const actrust_config_t *config);
  * @brief Tear down the Core framework.
  *
  * Submits a DEINIT job and waits for service shutdown. When this call returns,
- * internal Core resources have been released.
+ * internal Core resources have been released. Completion callbacks execute on
+ * the Core service task; calling @c actrust_deinit from a callback returns
+ * @c ACTRUST_ERR_BAD_STATE and must be deferred until the callback returns.
+ * If teardown fails, Core retains its owners and a later call may retry the
+ * teardown; only a successful return means all Core resources are released.
  *
  * @pre The caller must call @ref actrust_disconnect and wait for the disconnect
  *      callback before invoking this function.  Calling @c actrust_deinit while

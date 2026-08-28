@@ -342,7 +342,7 @@ static actrust_err_t core_downlink_start(actrust_core_ctx_t *ctx)
 
 static actrust_err_t core_downlink_stop(actrust_core_ctx_t *ctx)
 {
-    if (ctx->downlink_stop_sem != NULL) {
+    if (ctx->downlink_stop_sem != NULL && ctx->downlink_task != NULL) {
         (void) actrust_sem_post(ctx->downlink_stop_sem);
     }
     if (ctx->downlink_task != NULL) {
@@ -355,7 +355,12 @@ static actrust_err_t core_downlink_stop(actrust_core_ctx_t *ctx)
         ctx->downlink_task = NULL;
     }
     if (ctx->downlink_stop_sem != NULL) {
-        (void) actrust_sem_destroy(ctx->downlink_stop_sem);
+        actrust_err_t sem_err = actrust_sem_destroy(ctx->downlink_stop_sem);
+        if (ACTRUST_IS_ERR(sem_err)) {
+            LOG_WARN("downlink stop semaphore destroy failed: 0x%08" PRIx32,
+                     sem_err);
+            return sem_err;
+        }
         ctx->downlink_stop_sem = NULL;
     }
 
@@ -414,7 +419,7 @@ static actrust_err_t core_ntp_start(actrust_core_ctx_t *ctx)
 
 static actrust_err_t core_ntp_stop(actrust_core_ctx_t *ctx)
 {
-    if (ctx->ntp_stop_sem != NULL) {
+    if (ctx->ntp_stop_sem != NULL && ctx->ntp_task != NULL) {
         (void) actrust_sem_post(ctx->ntp_stop_sem);
     }
     if (ctx->ntp_task != NULL) {
@@ -427,7 +432,12 @@ static actrust_err_t core_ntp_stop(actrust_core_ctx_t *ctx)
         ctx->ntp_task = NULL;
     }
     if (ctx->ntp_stop_sem != NULL) {
-        (void) actrust_sem_destroy(ctx->ntp_stop_sem);
+        actrust_err_t sem_err = actrust_sem_destroy(ctx->ntp_stop_sem);
+        if (ACTRUST_IS_ERR(sem_err)) {
+            LOG_WARN("ntp stop semaphore destroy failed: 0x%08" PRIx32,
+                     sem_err);
+            return sem_err;
+        }
         ctx->ntp_stop_sem = NULL;
     }
 
@@ -548,43 +558,48 @@ actrust_err_t core_ops_deinit(actrust_job_t *job)
     actrust_err_t err = core_ntp_stop(ctx);
     if (ACTRUST_IS_ERR(err)) {
         LOG_WARN("ntp stop during deinit failed: 0x%08" PRIx32, err);
+        return err;
     }
 
-    actrust_err_t cleanup_err = core_downlink_stop(ctx);
-    if (ACTRUST_IS_ERR(cleanup_err)) {
-        LOG_WARN("downlink stop during deinit failed: 0x%08" PRIx32,
-                 cleanup_err);
-        if (ACTRUST_IS_OK(err)) {
-            err = cleanup_err;
-        }
+    err = core_downlink_stop(ctx);
+    if (ACTRUST_IS_ERR(err)) {
+        LOG_WARN("downlink stop during deinit failed: 0x%08" PRIx32, err);
+        return err;
     }
 
     if (ctx->sign_key != NULL) {
-        (void) actrust_crypto_key_close(ctx->crypto, &ctx->sign_key);
-        ctx->sign_key = NULL;
-    }
-
-    if (ctx->cloud != NULL) {
-        actrust_err_t cloud_err = actrust_cloud_deinit(ctx->cloud);
-        if (cloud_err != ACTRUST_OK) {
-            LOG_WARN("cloud deinit during deinit failed: 0x%08" PRIx32,
-                     cloud_err);
-            if (ACTRUST_IS_OK(err)) {
-                err = cloud_err;
-            }
-        } else {
-            ctx->cloud          = NULL;
-            ctx->downlink_queue = NULL;
+        err = actrust_crypto_key_close(ctx->crypto, &ctx->sign_key);
+        if (ACTRUST_IS_ERR(err)) {
+            return err;
         }
     }
 
-    (void) actrust_ntp_deinit(ctx->ntp);
-    ctx->ntp = NULL;
+    if (ctx->cloud != NULL) {
+        err = actrust_cloud_deinit(ctx->cloud);
+        if (ACTRUST_IS_ERR(err)) {
+            LOG_WARN("cloud deinit during deinit failed: 0x%08" PRIx32, err);
+            return err;
+        }
+        ctx->cloud          = NULL;
+        ctx->downlink_queue = NULL;
+    }
 
-    (void) actrust_crypto_deinit(&ctx->crypto);
-    ctx->crypto = NULL;
+    if (ctx->ntp != NULL) {
+        err = actrust_ntp_deinit(ctx->ntp);
+        if (ACTRUST_IS_ERR(err)) {
+            return err;
+        }
+        ctx->ntp = NULL;
+    }
 
-    return err;
+    if (ctx->crypto != NULL) {
+        err = actrust_crypto_deinit(&ctx->crypto);
+        if (ACTRUST_IS_ERR(err)) {
+            return err;
+        }
+    }
+
+    return ACTRUST_OK;
 }
 
 /* ========================================================================

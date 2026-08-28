@@ -114,13 +114,30 @@ static void core_service_complete_job(actrust_job_t *job, actrust_err_t result)
 {
     job->result = result;
 
-    actrust_callback_ctx_t cb    = core_get_callback();
-    actrust_core_state_t   state = core_get_state();
-    if (cb.fn != NULL) {
-        cb.fn(result, state, cb.user_data);
+    actrust_callback_ctx_t cb;
+    actrust_core_state_t   state;
+    bool                   is_deinit = job->type == ACTRUST_JOB_DEINIT;
+
+    core_lock();
+    cb    = g_core.cb;
+    state = g_core.state;
+    if (is_deinit) {
+        g_core.deinit_result   = result;
+        g_core.deinit_job_done = true;
     }
+    if (cb.fn != NULL) {
+        g_core.callback_active = true;
+    }
+    core_unlock();
 
     (void) actrust_job_release(&g_core.job_pool, job);
+
+    if (cb.fn != NULL) {
+        cb.fn(result, state, cb.user_data);
+        core_lock();
+        g_core.callback_active = false;
+        core_unlock();
+    }
 }
 
 /* ========================================================================
@@ -148,8 +165,12 @@ static void core_service_main(void *arg)
             continue;
         }
 
-        err = core_service_dispatch_job(job);
+        err            = core_service_dispatch_job(job);
+        bool is_deinit = job->type == ACTRUST_JOB_DEINIT;
         core_service_complete_job(job, err);
+        if (is_deinit) {
+            break;
+        }
     }
 }
 

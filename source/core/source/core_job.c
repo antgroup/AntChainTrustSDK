@@ -371,6 +371,9 @@ actrust_err_t actrust_job_queue_dequeue(actrust_job_queue_t *q,
 
     err = actrust_mutex_lock(q->lock);
     if (ACTRUST_IS_ERR(err)) {
+        if (q->waiter_count > 0u) {
+            q->waiter_count--;
+        }
         (void) actrust_sem_post(q->sem_items);
         return err;
     }

@@ -66,6 +66,13 @@ typedef struct {
     actrust_core_register_phase_t phase;
 } actrust_core_register_ctx_t;
 
+typedef enum {
+    ACTRUST_CORE_DEINIT_PHASE_JOB = 0,
+    ACTRUST_CORE_DEINIT_PHASE_QUEUE,
+    ACTRUST_CORE_DEINIT_PHASE_POOL,
+    ACTRUST_CORE_DEINIT_PHASE_LOCK,
+} actrust_core_deinit_phase_t;
+
 /** @brief Global core context (single instance). */
 typedef struct {
     /* Core control */
@@ -74,6 +81,13 @@ typedef struct {
     actrust_core_state_t state; /**< Core lifecycle state. */
     bool deinit_pending; /**< Set by the first actrust_deinit() to win the race;
                             gates concurrent callers. */
+    bool
+        callback_active; /**< User callback is executing on the service task. */
+    bool deinit_finalizing; /**< A caller owns the current teardown attempt. */
+    bool deinit_job_done; /**< DEINIT job has completed on the service task. */
+    actrust_core_deinit_phase_t
+                  deinit_phase;  /**< Next Core teardown phase to execute. */
+    actrust_err_t deinit_result; /**< Result of the most recent DEINIT job. */
     actrust_callback_ctx_t
         cb; /**< Registered completion callback and its user context. */
 

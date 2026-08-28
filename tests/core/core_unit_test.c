@@ -32,6 +32,8 @@ static actrust_err_t        s_last_result;
 static actrust_core_state_t s_last_state;
 static int                  s_callbacks_seen;
 static actrust_sem_t        s_callback_sem;
+static bool                 s_deinit_from_callback;
+static actrust_err_t        s_callback_deinit_result;
 
 static void test_callback(actrust_err_t result, actrust_core_state_t state,
                           void *user_data)
@@ -39,6 +41,9 @@ static void test_callback(actrust_err_t result, actrust_core_state_t state,
     (void) user_data;
     s_last_result = result;
     s_last_state  = state;
+    if (s_deinit_from_callback) {
+        s_callback_deinit_result = actrust_deinit();
+    }
     if (s_callback_sem != NULL) {
         (void) actrust_sem_post(s_callback_sem);
     }
@@ -129,10 +134,12 @@ static actrust_err_t run_api_workers(core_api_worker_t *workers,
 
 void setUp(void)
 {
-    s_last_result    = (actrust_err_t) -1;
-    s_last_state     = ACTRUST_CORE_UNINIT;
-    s_callbacks_seen = 0;
-    s_callback_sem   = NULL;
+    s_last_result            = (actrust_err_t) -1;
+    s_last_state             = ACTRUST_CORE_UNINIT;
+    s_callbacks_seen         = 0;
+    s_callback_sem           = NULL;
+    s_deinit_from_callback   = false;
+    s_callback_deinit_result = ACTRUST_OK;
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_create(&s_callback_sem, 0u));
 }
 
@@ -553,6 +560,19 @@ void test_callback_fires_on_init(void)
     TEST_ASSERT_TRUE(wait_for_callbacks(2, 5000u));
 }
 
+void test_callback_deinit_is_rejected(void)
+{
+    s_deinit_from_callback = true;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_set_callback(test_callback, NULL));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_init(NULL));
+    TEST_ASSERT_TRUE(wait_for_callbacks(1, TEST_WORKER_TIMEOUT_MS));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_BAD_STATE,
+                      ACTRUST_ERR_CODE(s_callback_deinit_result));
+    s_deinit_from_callback = false;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_deinit());
+    TEST_ASSERT_TRUE(wait_for_callbacks(2, TEST_WORKER_TIMEOUT_MS));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -577,5 +597,6 @@ int main(void)
     RUN_TEST(test_init_deinit_lifecycle);
     RUN_TEST(test_repeated_init_deinit_lifecycle);
     RUN_TEST(test_callback_fires_on_init);
+    RUN_TEST(test_callback_deinit_is_rejected);
     return UNITY_END();
 }
