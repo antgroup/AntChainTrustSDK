@@ -373,6 +373,13 @@ static bool kv_lookup_storage_id(const char *ns, size_t len,
  * Private Helper Functions — Record Search
  * ======================================================================== */
 
+typedef enum {
+    KV_FIND_NOT_FOUND = 0,
+    KV_FIND_FOUND,
+    KV_FIND_IO_ERROR,
+    KV_FIND_CORRUPT,
+} kv_find_result_t;
+
 /**
  * @brief Search for an existing record that matches @p key.
  *
@@ -384,19 +391,23 @@ static bool kv_lookup_storage_id(const char *ns, size_t len,
  * @param[in]  key_len    Key length in bytes.
  * @param[out] out_index  Receives the matching record index.  May be NULL.
  * @param[out] out_rec    Receives the matching record contents.  May be NULL.
- * @return @c true if a matching record was found, @c false otherwise.
+ * @return The record search result.
  */
-static bool kv_find_record(actrust_kv_t kv, const char *key, size_t key_len,
-                           size_t *out_index, kv_record_t *out_rec)
+static kv_find_result_t kv_find_record(actrust_kv_t kv, const char *key,
+                                       size_t key_len, size_t *out_index,
+                                       kv_record_t *out_rec)
 {
     for (size_t i = 0; i < CONFIG_ACTRUST_KV_MAX_RECORDS; ++i) {
         kv_record_head_t head;
 
         if (kv_read_record_head(kv->st, i, &head) != ACTRUST_OK) {
-            continue;
+            return KV_FIND_IO_ERROR;
         }
         if (!kv_record_head_is_valid(&head)) {
-            continue;
+            if (head.used == KV_RECORD_NOT_USED) {
+                continue;
+            }
+            return KV_FIND_CORRUPT;
         }
         if (head.used != KV_RECORD_IN_USE) {
             continue;
@@ -406,16 +417,25 @@ static bool kv_find_record(actrust_kv_t kv, const char *key, size_t key_len,
             if (out_index != NULL) {
                 *out_index = i;
             }
-            if (out_rec != NULL) {
-                if (kv_read_record(kv->st, i, out_rec) != ACTRUST_OK) {
-                    return false;
-                }
+
+            kv_record_t record;
+            if (kv_read_record(kv->st, i, &record) != ACTRUST_OK) {
+                return KV_FIND_IO_ERROR;
             }
-            return true;
+#if CONFIG_ACTRUST_KV_ENABLE_CRC
+            if (record.head.crc32 !=
+                kv_crc32(record.value, record.head.value_len)) {
+                return KV_FIND_CORRUPT;
+            }
+#endif
+            if (out_rec != NULL) {
+                *out_rec = record;
+            }
+            return KV_FIND_FOUND;
         }
     }
 
-    return false;
+    return KV_FIND_NOT_FOUND;
 }
 
 /**
@@ -423,23 +443,30 @@ static bool kv_find_record(actrust_kv_t kv, const char *key, size_t key_len,
  *
  * @param[in]  kv         KV handle (must hold lock).
  * @param[out] out_index  Receives the index of the free slot.
- * @return @c true if a free slot was found, @c false if storage is full.
+ * @return ACTRUST_OK when a free slot is found, or a storage/corruption error.
  */
-static bool kv_find_empty_slot(actrust_kv_t kv, size_t *out_index)
+static actrust_err_t kv_find_empty_slot(actrust_kv_t kv, size_t *out_index)
 {
     for (size_t i = 0; i < CONFIG_ACTRUST_KV_MAX_RECORDS; ++i) {
         kv_record_head_t head;
 
-        if (kv_read_record_head(kv->st, i, &head) != ACTRUST_OK) {
-            continue;
+        actrust_err_t err = kv_read_record_head(kv->st, i, &head);
+        if (err != ACTRUST_OK) {
+            return KV_ERR(ACTRUST_ERR_IO);
+        }
+        if (!kv_record_head_is_valid(&head)) {
+            if (head.used == KV_RECORD_NOT_USED) {
+                continue;
+            }
+            return KV_ERR(ACTRUST_ERR_IO);
         }
         if (head.used == KV_RECORD_NOT_USED) {
             *out_index = i;
-            return true;
+            return ACTRUST_OK;
         }
     }
 
-    return false;
+    return KV_ERR(ACTRUST_ERR_NO_RESOURCE);
 }
 
 /* ========================================================================
@@ -665,14 +692,18 @@ actrust_err_t actrust_kv_set(actrust_kv_t kv, const char *key, size_t key_len,
         return err;
     }
 
-    size_t index  = 0u;
-    bool   is_new = false;
-
-    /* Try to locate an existing record with the same key. */
-    if (!kv_find_record(kv, key, key_len, &index, NULL)) {
+    size_t           index  = 0u;
+    bool             is_new = false;
+    kv_find_result_t find_result =
+        kv_find_record(kv, key, key_len, &index, NULL);
+    if (find_result == KV_FIND_IO_ERROR || find_result == KV_FIND_CORRUPT) {
+        err = KV_ERR(ACTRUST_ERR_IO);
+        goto out;
+    }
+    if (find_result == KV_FIND_NOT_FOUND) {
         /* Key does not exist - need a free slot. */
-        if (!kv_find_empty_slot(kv, &index)) {
-            err = KV_ERR(ACTRUST_ERR_NO_RESOURCE);
+        err = kv_find_empty_slot(kv, &index);
+        if (err != ACTRUST_OK) {
             goto out;
         }
         is_new = true;
@@ -745,12 +776,13 @@ actrust_err_t actrust_kv_get(actrust_kv_t kv, const char *key, size_t key_len,
         return err;
     }
 
-    kv_record_t rec;
-    if (!kv_find_record(kv, key, key_len, NULL, &rec)) {
+    kv_record_t      rec;
+    kv_find_result_t find_result = kv_find_record(kv, key, key_len, NULL, &rec);
+    if (find_result == KV_FIND_NOT_FOUND) {
         err = KV_ERR(ACTRUST_ERR_NO_RESOURCE);
         goto out;
     }
-    if (!kv_record_head_is_valid(&rec.head)) {
+    if (find_result == KV_FIND_IO_ERROR || find_result == KV_FIND_CORRUPT) {
         err = KV_ERR(ACTRUST_ERR_IO);
         goto out;
     }
@@ -800,9 +832,15 @@ actrust_err_t actrust_kv_del(actrust_kv_t kv, const char *key, size_t key_len)
         return err;
     }
 
-    size_t index = 0u;
-    if (!kv_find_record(kv, key, key_len, &index, NULL)) {
+    size_t           index = 0u;
+    kv_find_result_t find_result =
+        kv_find_record(kv, key, key_len, &index, NULL);
+    if (find_result == KV_FIND_NOT_FOUND) {
         err = KV_ERR(ACTRUST_ERR_NO_RESOURCE);
+        goto out;
+    }
+    if (find_result == KV_FIND_IO_ERROR || find_result == KV_FIND_CORRUPT) {
+        err = KV_ERR(ACTRUST_ERR_IO);
         goto out;
     }
 
@@ -854,6 +892,15 @@ actrust_err_t actrust_kv_exists(actrust_kv_t kv, const char *key,
         return err;
     }
 
-    *out_exist = kv_find_record(kv, key, key_len, NULL, NULL);
-    return kv_unlock(kv);
+    kv_find_result_t find_result = kv_find_record(kv, key, key_len, NULL, NULL);
+    if (find_result == KV_FIND_IO_ERROR || find_result == KV_FIND_CORRUPT) {
+        err = KV_ERR(ACTRUST_ERR_IO);
+    } else {
+        *out_exist = find_result == KV_FIND_FOUND;
+    }
+    actrust_err_t unlock_err = kv_unlock(kv);
+    if (err == ACTRUST_OK && unlock_err != ACTRUST_OK) {
+        err = unlock_err;
+    }
+    return err;
 }

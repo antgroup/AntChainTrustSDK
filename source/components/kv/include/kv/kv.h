@@ -114,6 +114,8 @@ actrust_err_t actrust_kv_close(actrust_kv_t kv);
  *         out of range.
  * @return Error with reason @c ACTRUST_ERR_NO_RESOURCE if no free record slot
  *         is available.
+ * @return Error with reason @c ACTRUST_ERR_IO if a storage read fails or a
+ *         record fails persistent metadata or CRC validation.
  */
 actrust_err_t actrust_kv_set(actrust_kv_t kv, const char *key, size_t key_len,
                              const void *value, size_t value_len);
@@ -137,11 +139,11 @@ actrust_err_t actrust_kv_set(actrust_kv_t kv, const char *key, size_t key_len,
  *
  * @return ACTRUST_OK on success.
  * @return Error with reason @c ACTRUST_ERR_NO_RESOURCE if the key does not
- * exist.
+ *         exist.
+ * @return Error with reason @c ACTRUST_ERR_IO if a record cannot be read or
+ *         fails persistent metadata or CRC validation.
  * @return Error with reason @c ACTRUST_ERR_BUF_TOO_SMALL if @p out_cap is
  *         smaller than the actual value length.
- * @return Error with reason @c ACTRUST_ERR_IO if the CRC integrity check fails
- *         (possible data corruption).
  */
 actrust_err_t actrust_kv_get(actrust_kv_t kv, const char *key, size_t key_len,
                              void *out_value, size_t out_cap, size_t *out_len);
@@ -157,7 +159,9 @@ actrust_err_t actrust_kv_get(actrust_kv_t kv, const char *key, size_t key_len,
  * @return Error with reason @c ACTRUST_ERR_INVALID_ARG if any argument is
  *         invalid.
  * @return Error with reason @c ACTRUST_ERR_NO_RESOURCE if the key does not
- * exist.
+ *         exist.
+ * @return Error with reason @c ACTRUST_ERR_IO if a storage read fails or a
+ *         record fails persistent metadata or CRC validation.
  */
 actrust_err_t actrust_kv_del(actrust_kv_t kv, const char *key, size_t key_len);
 
@@ -173,8 +177,8 @@ actrust_err_t actrust_kv_del(actrust_kv_t kv, const char *key, size_t key_len);
  * @param[out] out_exist  Set to @c true if the key exists, @c false otherwise.
  *
  * @return ACTRUST_OK on success (regardless of whether the key exists).
- * @return Error with reason @c ACTRUST_ERR_INVALID_ARG if any argument is
- *         invalid.
+ * @return Error with reason @c ACTRUST_ERR_IO if a storage read fails or a
+ *         record fails persistent metadata or CRC validation.
  */
 actrust_err_t actrust_kv_exists(actrust_kv_t kv, const char *key,
                                 size_t key_len, bool *out_exist);
