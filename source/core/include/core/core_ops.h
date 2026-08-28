@@ -9,6 +9,9 @@
 #ifndef ACTRUST_CORE_OPS_H
 #define ACTRUST_CORE_OPS_H
 
+/* C standard */
+#include <stdbool.h>
+
 /* Project */
 #include "actrust_errno.h"
 
@@ -54,6 +57,27 @@ actrust_err_t core_ops_disconnect(actrust_job_t *job);
  * @return @c ACTRUST_OK on success.
  */
 actrust_err_t core_ops_register(actrust_job_t *job);
+
+/**
+ * @brief Read the persisted registration marker.
+ *
+ * @param[out] out_registered  Receives whether the marker exists.
+ *
+ * @return @c ACTRUST_OK when the marker is read successfully.
+ * @return The first KV error encountered otherwise.
+ */
+actrust_err_t core_read_local_registered(bool *out_registered);
+
+/**
+ * @brief Persist registration and commit the REGISTERED state.
+ *
+ * The state transition is performed only after the registration marker has
+ * been stored and the KV handle has closed successfully.
+ *
+ * @return @c ACTRUST_OK when persistence and the state transition succeed.
+ * @return The first KV error encountered otherwise.
+ */
+actrust_err_t core_commit_registered(void);
 
 /**
  * @brief Execute ACTRUST_JOB_SEND — publish business data.

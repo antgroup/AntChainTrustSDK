@@ -606,7 +606,7 @@ actrust_err_t core_ops_deinit(actrust_job_t *job)
  * Connect / Disconnect
  * ======================================================================== */
 
-static actrust_err_t core_read_local_registered(bool *out_registered)
+actrust_err_t core_read_local_registered(bool *out_registered)
 {
     if (out_registered == NULL) {
         return CORE_ERR(ACTRUST_ERR_INVALID_ARG);
@@ -619,23 +619,25 @@ static actrust_err_t core_read_local_registered(bool *out_registered)
         actrust_kv_open(CORE_KV_NAMESPACE, sizeof(CORE_KV_NAMESPACE) - 1u, &kv);
     if (ACTRUST_IS_ERR(err)) {
         LOG_WARN(
-            "kv open failed, treating device as unregistered: 0x%08" PRIx32,
+            "kv open failed while reading registration status: 0x%08" PRIx32,
             err);
-        return ACTRUST_OK;
+        return err;
     }
 
     err =
         actrust_kv_exists(kv, CORE_KV_KEY_REGISTERED,
                           sizeof(CORE_KV_KEY_REGISTERED) - 1u, out_registered);
     if (ACTRUST_IS_ERR(err)) {
-        LOG_WARN("kv exists failed, treating device as unregistered: "
+        LOG_WARN("kv exists failed while reading registration status: "
                  "0x%08" PRIx32,
                  err);
-        *out_registered = false;
     }
 
-    (void) actrust_kv_close(kv);
-    return ACTRUST_OK;
+    actrust_err_t close_err = actrust_kv_close(kv);
+    if (ACTRUST_IS_OK(err) && ACTRUST_IS_ERR(close_err)) {
+        err = close_err;
+    }
+    return err;
 }
 
 static actrust_err_t core_persist_registered(void)
@@ -647,7 +649,7 @@ static actrust_err_t core_persist_registered(void)
         LOG_WARN(
             "failed to open kv namespace for registration status: 0x%08" PRIx32,
             err);
-        return ACTRUST_OK;
+        return err;
     }
 
     err = actrust_kv_set(kv, CORE_KV_KEY_REGISTERED,
@@ -656,7 +658,21 @@ static actrust_err_t core_persist_registered(void)
         LOG_WARN("failed to persist registration status: 0x%08" PRIx32, err);
     }
 
-    (void) actrust_kv_close(kv);
+    actrust_err_t close_err = actrust_kv_close(kv);
+    if (ACTRUST_IS_OK(err) && ACTRUST_IS_ERR(close_err)) {
+        err = close_err;
+    }
+    return err;
+}
+
+actrust_err_t core_commit_registered(void)
+{
+    actrust_err_t err = core_persist_registered();
+    if (ACTRUST_IS_ERR(err)) {
+        return err;
+    }
+
+    core_set_state(ACTRUST_CORE_REGISTERED);
     return ACTRUST_OK;
 }
 
@@ -1216,13 +1232,7 @@ actrust_err_t core_ops_register(actrust_job_t *job)
         return err;
     }
 
-    err = core_persist_registered();
-    if (ACTRUST_IS_ERR(err)) {
-        return err;
-    }
-
-    core_set_state(ACTRUST_CORE_REGISTERED);
-    return ACTRUST_OK;
+    return core_commit_registered();
 }
 
 /* ========================================================================
