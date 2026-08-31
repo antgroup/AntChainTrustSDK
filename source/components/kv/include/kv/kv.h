@@ -6,7 +6,11 @@
  * @brief Key-Value persistent storage component
  *
  * This module provides a namespace-scoped, thread-safe key-value store built
- * on top of the AntChainTrustSDK storage adapter layer.  Typical usage:
+ * on top of the AntChainTrustSDK storage adapter layer.  The on-disk format is
+ * versioned and journaled; legacy v1 regions are rejected without automatic
+ * migration.  Shared namespace locking is process-local, and CRC validation
+ * detects accidental corruption but does not provide authenticity or rollback
+ * protection.  Typical usage:
  *
  * @code{.c}
  *   actrust_kv_init();                               // once at boot
@@ -47,10 +51,10 @@ typedef struct actrust_kv *actrust_kv_t;
  * @brief Initialise all configured KV namespaces.
  *
  * For each namespace in the compile-time map this function opens the
- * corresponding storage region and formats it **only if it has not been
- * formatted yet** (i.e. the magic / version do not match).  Already
- * initialised regions are left untouched so that persistent data survives
- * across reboots.
+ * corresponding storage region and formats it only when it is completely
+ * virgin (all zeroes).  Legacy v1 regions are rejected without migration;
+ * already initialised v2 regions are recovered and left intact so that
+ * persistent data survives across reboots.
  *
  * Must be called once during system startup before any @ref actrust_kv_open.
  *
@@ -63,8 +67,9 @@ actrust_err_t actrust_kv_init(void);
  * @brief Open a KV namespace and return a handle.
  *
  * The namespace must have been previously initialised by @ref actrust_kv_init.
- * The returned handle owns a storage connection and a mutex; the caller is
- * responsible for releasing them via @ref actrust_kv_close.
+ * The returned handle owns a storage connection and references a shared
+ * process-local namespace lock; the caller is responsible for releasing the
+ * handle via @ref actrust_kv_close.
  *
  * @param[in]  ns      Namespace string (not necessarily NUL-terminated).
  * @param[in]  ns_len  Length of @p ns in bytes.  Must be > 0 and
@@ -75,8 +80,10 @@ actrust_err_t actrust_kv_init(void);
  * @return Error with reason @c ACTRUST_ERR_INVALID_ARG if any argument is
  *         invalid or the namespace is not in the compiled-in map.
  * @return Error with reason @c ACTRUST_ERR_NO_MEM if heap allocation fails.
- * @return Error with reason @c ACTRUST_ERR_BAD_STATE if the storage has not
- *         been formatted by @ref actrust_kv_init.
+ * @return Error with reason @c ACTRUST_ERR_UNSUPPORTED if the storage contains
+ *         the legacy v1 format, which is not migrated automatically.
+ * @return Error with reason @c ACTRUST_ERR_BAD_STATE if the storage cannot be
+ *         initialized.
  */
 actrust_err_t actrust_kv_open(const char *ns, size_t ns_len,
                               actrust_kv_t *out_kv);

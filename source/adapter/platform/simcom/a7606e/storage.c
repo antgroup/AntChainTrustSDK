@@ -50,12 +50,29 @@
  * Keep NULL reserved as the invalid public handle while still allowing POSIX
  * fd 0, which is a valid descriptor.
  */
-#define STORAGE_TO_FD(st) ((int) ((intptr_t) (st) - 1))
-#define FD_TO_STORAGE(fd) ((actrust_storage_t) (intptr_t) ((fd) + 1))
+typedef struct {
+    int  fd;
+    bool closed;
+} storage_handle_t;
+
+#define STORAGE_TO_HANDLE(st) ((storage_handle_t *) (st))
+#define STORAGE_TO_FD(st)     (STORAGE_TO_HANDLE(st)->fd)
 
 /* ========================================================================
  * Private Helpers
  * ======================================================================== */
+
+static bool storage_valid_range(uint32_t offset, size_t len)
+{
+    return offset <= (uint32_t) CONFIG_ACTRUST_STORAGE_REGION_SIZE &&
+           len <= (size_t) CONFIG_ACTRUST_STORAGE_REGION_SIZE - offset;
+}
+
+static bool storage_valid_handle(actrust_storage_t st)
+{
+    return st != NULL && !STORAGE_TO_HANDLE(st)->closed &&
+           STORAGE_TO_FD(st) >= 0;
+}
 
 /**
  * @brief Expand a leading '~' to the user's home directory
@@ -100,58 +117,59 @@ static bool storage_expand_tilde(const char *path, char *buf, size_t size)
 }
 
 /**
- * @brief Ensure a directory and all its parents exist (like @c mkdir @c -p)
+ * @brief Ensure a directory path exists and open it without following symlinks
  * @param dir Directory path (will NOT be modified)
- * @return @c true on success
+ * @return Open directory descriptor on success, @c -1 on failure
+ * @note Each path component is opened relative to its verified parent.
  */
-static bool storage_ensure_dir(const char *dir)
+static int storage_open_dir(const char *dir)
 {
     if (dir == NULL || dir[0] == '\0') {
-        return false;
+        return -1;
     }
 
-    size_t len = strlen(dir);
-    char   tmp[256];
-
-    if (len >= sizeof(tmp)) {
-        return false;
+    int current_fd =
+        open(dir[0] == '/' ? "/" : ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (current_fd < 0) {
+        return -1;
     }
 
-    memcpy(tmp, dir, len + 1u);
-
-    for (char *p = tmp + 1; *p != '\0'; ++p) {
-        if (*p != '/') {
-            continue;
+    const char *cursor = dir;
+    while (*cursor != '\0') {
+        while (*cursor == '/') {
+            cursor++;
         }
-
-        *p = '\0';
-
-        if (mkdir(tmp, STORAGE_DIR_MODE) != 0) {
-            if (errno != EEXIST) {
-                return false;
-            }
-
-            struct stat st;
-            if (lstat(tmp, &st) != 0 || !S_ISDIR(st.st_mode)) {
-                return false;
-            }
+        if (*cursor == '\0') {
+            break;
         }
-
-        *p = '/';
+        const char *end = cursor;
+        while (*end != '\0' && *end != '/') {
+            end++;
+        }
+        size_t len = (size_t) (end - cursor);
+        char   component[256];
+        if (len == 0u || len >= sizeof(component)) {
+            (void) close(current_fd);
+            return -1;
+        }
+        memcpy(component, cursor, len);
+        component[len] = '\0';
+        if (mkdirat(current_fd, component, STORAGE_DIR_MODE) != 0 &&
+            errno != EEXIST) {
+            (void) close(current_fd);
+            return -1;
+        }
+        int next_fd = openat(current_fd, component,
+                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (next_fd < 0) {
+            (void) close(current_fd);
+            return -1;
+        }
+        (void) close(current_fd);
+        current_fd = next_fd;
+        cursor     = end;
     }
-
-    if (mkdir(tmp, STORAGE_DIR_MODE) != 0) {
-        if (errno != EEXIST) {
-            return false;
-        }
-
-        struct stat st;
-        if (lstat(tmp, &st) != 0 || !S_ISDIR(st.st_mode)) {
-            return false;
-        }
-    }
-
-    return true;
+    return current_fd;
 }
 
 /**
@@ -249,19 +267,22 @@ actrust_err_t actrust_storage_open(actrust_storage_t   *out,
         return STORAGE_ERR(ACTRUST_ERR_IO);
     }
 
-    if (!storage_ensure_dir(base)) {
+    int dir_fd = storage_open_dir(base);
+    if (dir_fd < 0) {
         return STORAGE_ERR(ACTRUST_ERR_IO);
     }
 
-    char path[256];
-    int  n = snprintf(path, sizeof(path), "%s/%s%08x.bin", base,
+    char filename[64];
+    int  n = snprintf(filename, sizeof(filename), "%s%08x.bin",
                       CONFIG_ACTRUST_STORAGE_FILE_PREFIX, id);
-
-    if (n < 0 || (size_t) n >= sizeof(path)) {
+    if (n < 0 || (size_t) n >= sizeof(filename)) {
+        (void) close(dir_fd);
         return STORAGE_ERR(ACTRUST_ERR_BUF_TOO_SMALL);
     }
 
-    int fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW, STORAGE_FILE_MODE);
+    int fd = openat(dir_fd, filename, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC,
+                    STORAGE_FILE_MODE);
+    (void) close(dir_fd);
     if (fd < 0) {
         return STORAGE_ERR(ACTRUST_ERR_IO);
     }
@@ -277,24 +298,70 @@ actrust_err_t actrust_storage_open(actrust_storage_t   *out,
         return STORAGE_ERR(ACTRUST_ERR_IO);
     }
 
-    *out = FD_TO_STORAGE(fd);
+    if ((uint64_t) st.st_size < (uint64_t) CONFIG_ACTRUST_STORAGE_REGION_SIZE &&
+        ftruncate(fd, (off_t) CONFIG_ACTRUST_STORAGE_REGION_SIZE) != 0) {
+        (void) close(fd);
+        return STORAGE_ERR(ACTRUST_ERR_IO);
+    }
+
+    storage_handle_t *handle = calloc(1u, sizeof(*handle));
+    if (handle == NULL) {
+        (void) close(fd);
+        return STORAGE_ERR(ACTRUST_ERR_NO_MEM);
+    }
+    handle->fd = fd;
+    *out       = (actrust_storage_t) handle;
     return ACTRUST_OK;
 }
 
 actrust_err_t actrust_storage_close(actrust_storage_t st)
 {
-    if (st == NULL) {
+    if (!storage_valid_handle(st)) {
         return STORAGE_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    (void) close(STORAGE_TO_FD(st));
+    storage_handle_t *handle = STORAGE_TO_HANDLE(st);
+    if (close(handle->fd) != 0) {
+        return STORAGE_ERR(ACTRUST_ERR_IO);
+    }
+    handle->closed = true;
+    free(handle);
+    return ACTRUST_OK;
+}
+
+actrust_err_t actrust_storage_get_capacity(actrust_storage_t st,
+                                           uint32_t         *capacity)
+{
+    if (!storage_valid_handle(st) || capacity == NULL) {
+        return STORAGE_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    struct stat info;
+    if (fstat(STORAGE_TO_FD(st), &info) != 0) {
+        return STORAGE_ERR(ACTRUST_ERR_IO);
+    }
+
+    *capacity = (uint32_t) info.st_size;
+    return ACTRUST_OK;
+}
+
+actrust_err_t actrust_storage_sync(actrust_storage_t st)
+{
+    if (!storage_valid_handle(st)) {
+        return STORAGE_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    if (fsync(STORAGE_TO_FD(st)) != 0) {
+        return STORAGE_ERR(ACTRUST_ERR_IO);
+    }
     return ACTRUST_OK;
 }
 
 actrust_err_t actrust_storage_read(actrust_storage_t st, uint32_t offset,
                                    uint8_t *buf, size_t len)
 {
-    if (st == NULL || (buf == NULL && len > 0u)) {
+    if (!storage_valid_handle(st) || !storage_valid_range(offset, len) ||
+        (buf == NULL && len > 0u)) {
         return STORAGE_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
@@ -308,7 +375,8 @@ actrust_err_t actrust_storage_read(actrust_storage_t st, uint32_t offset,
 actrust_err_t actrust_storage_write(actrust_storage_t st, uint32_t offset,
                                     const uint8_t *buf, size_t len)
 {
-    if (st == NULL || (buf == NULL && len > 0u)) {
+    if (!storage_valid_handle(st) || !storage_valid_range(offset, len) ||
+        (buf == NULL && len > 0u)) {
         return STORAGE_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
@@ -330,7 +398,7 @@ actrust_err_t actrust_storage_write(actrust_storage_t st, uint32_t offset,
 actrust_err_t actrust_storage_erase(actrust_storage_t st, uint32_t offset,
                                     uint32_t len)
 {
-    if (st == NULL) {
+    if (!storage_valid_handle(st) || !storage_valid_range(offset, len)) {
         return STORAGE_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 

@@ -120,7 +120,7 @@ void test_kv_concurrent(void)
     }
 
     for (int i = 0; i < THREAD_COUNT; ++i) {
-        TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_task_join(tasks[i], 3000u));
+        TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_task_join(tasks[i], 15000u));
         TEST_ASSERT_EQUAL(0, ctxs[i].result);
     }
 

@@ -24,7 +24,7 @@
 #define ACTRUST_TEST_KV_NAMESPACE_LEN 6u
 #define ACTRUST_TEST_KV_STORAGE_ID    0x00000001u
 #define ACTRUST_TEST_KV_RECORD_IN_USE 0x01u
-
+#define ACTRUST_TEST_KV_DATA_OFFSET   128u
 static actrust_kv_t kv;
 
 typedef struct {
@@ -84,22 +84,22 @@ void test_open_zero_len(void)
                           actrust_kv_open(ACTRUST_TEST_KV_NAMESPACE, 0, &h));
 }
 
-void test_open_rejects_unformatted_storage(void)
+void test_open_formats_virgin_storage(void)
 {
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_kv_close(kv));
     kv = NULL;
 
-    actrust_storage_t st = NULL;
+    actrust_storage_t st       = NULL;
+    uint32_t          capacity = 0u;
     TEST_ASSERT_EQUAL(ACTRUST_OK,
                       actrust_storage_open(&st, ACTRUST_TEST_KV_STORAGE_ID));
-    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_erase(st, 0, 64));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_get_capacity(st, &capacity));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_erase(st, 0u, capacity));
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_close(st));
 
-    actrust_kv_t  h   = NULL;
-    actrust_err_t err = actrust_kv_open(ACTRUST_TEST_KV_NAMESPACE,
-                                        ACTRUST_TEST_KV_NAMESPACE_LEN, &h);
-    TEST_ASSERT_EQUAL(ACTRUST_ERR_BAD_STATE, ACTRUST_ERR_CODE(err));
-    TEST_ASSERT_NULL(h);
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_kv_open(ACTRUST_TEST_KV_NAMESPACE,
+                                      ACTRUST_TEST_KV_NAMESPACE_LEN, &kv));
 }
 
 void test_set_get_roundtrip(void)
@@ -158,7 +158,7 @@ void test_get_rejects_corrupt_record_value_len(void)
     bool     found      = false;
     uint32_t len_offset = 0u;
     for (size_t i = 0; i < CONFIG_ACTRUST_KV_MAX_RECORDS; ++i) {
-        uint32_t         rec_offset = (uint32_t) (sizeof(test_kv_header_t) +
+        uint32_t         rec_offset = (uint32_t) (ACTRUST_TEST_KV_DATA_OFFSET +
                                           sizeof(test_kv_record_t) * i);
         test_kv_record_t rec;
 
@@ -209,7 +209,7 @@ static void corrupt_record_value(void)
                       actrust_storage_open(&st, ACTRUST_TEST_KV_STORAGE_ID));
 
     test_kv_record_t rec;
-    uint32_t         rec_offset = (uint32_t) sizeof(test_kv_header_t);
+    uint32_t         rec_offset = (uint32_t) ACTRUST_TEST_KV_DATA_OFFSET;
     TEST_ASSERT_EQUAL(
         ACTRUST_OK,
         actrust_storage_read(st, rec_offset, (uint8_t *) &rec, sizeof(rec)));
@@ -338,7 +338,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_open_null_args);
     RUN_TEST(test_open_zero_len);
-    RUN_TEST(test_open_rejects_unformatted_storage);
+    RUN_TEST(test_open_formats_virgin_storage);
     RUN_TEST(test_set_get_roundtrip);
     RUN_TEST(test_set_overwrite);
     RUN_TEST(test_get_nonexistent);
