@@ -27,7 +27,9 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/random.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -94,83 +96,144 @@ static bool sec_expand_tilde(const char *path, char *buf, size_t size)
     return written >= 0 && (size_t) written < size;
 }
 
-/**
- * @brief Ensure a directory and all its parents exist (like @c mkdir @c -p)
- * @param dir Directory path (will NOT be modified)
- * @return @c true on success
- */
-static bool sec_ensure_dir(const char *dir)
+static bool sec_stat_is_directory(const struct stat *st)
 {
-    if (dir == NULL || dir[0] == '\0') {
-        return false;
-    }
-
-    size_t len = strlen(dir);
-    char   tmp[SEC_PATH_MAX];
-
-    if (len >= sizeof(tmp)) {
-        return false;
-    }
-
-    memcpy(tmp, dir, len + 1u);
-
-    for (char *p = tmp + 1; *p != '\0'; ++p) {
-        if (*p != '/') {
-            continue;
-        }
-
-        *p = '\0';
-
-        if (mkdir(tmp, SEC_DIR_MODE) != 0) {
-            if (errno != EEXIST) {
-                return false;
-            }
-
-            struct stat st;
-            if (lstat(tmp, &st) != 0 || !S_ISDIR(st.st_mode)) {
-                return false;
-            }
-        }
-
-        *p = '/';
-    }
-
-    if (mkdir(tmp, SEC_DIR_MODE) != 0) {
-        if (errno != EEXIST) {
-            return false;
-        }
-
-        struct stat st;
-        if (lstat(tmp, &st) != 0 || !S_ISDIR(st.st_mode)) {
-            return false;
-        }
-    }
-
-    return true;
+    return st != NULL && S_ISDIR(st->st_mode) && st->st_uid == geteuid() &&
+           (st->st_mode & (mode_t) 0777) == SEC_DIR_MODE;
 }
 
-/**
- * @brief Build the filesystem path for a given slot.
- * @param[in]  slot_id  Slot identifier.
- * @param[out] path     Destination buffer.
- * @param[in]  size     Size of @p path in bytes.
- * @return @c true on success.
- */
-static bool sec_build_path(actrust_sec_slot_t slot_id, char *path, size_t size)
+static bool sec_stat_is_directory_component(const struct stat *st)
+{
+    return st != NULL && S_ISDIR(st->st_mode);
+}
+
+static bool sec_stat_is_regular(const struct stat *st)
+{
+    return st != NULL && S_ISREG(st->st_mode) && st->st_uid == geteuid() &&
+           (st->st_mode & (mode_t) 0777) == SEC_FILE_MODE;
+}
+
+static int sec_open_store_dir(bool create)
 {
     char base[SEC_PATH_MAX];
 
     if (!sec_expand_tilde(CONFIG_ACTRUST_SEC_STORE_BASE_DIR, base,
                           sizeof(base))) {
-        return false;
+        errno = EINVAL;
+        return -1;
     }
 
-    if (!sec_ensure_dir(base)) {
-        return false;
+    const char *cursor = base;
+    int         dirfd =
+        base[0] == '/'
+                    ? open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+                    : open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dirfd < 0) {
+        return -1;
     }
 
-    int n = snprintf(path, size, "%s/sec_%08x.bin", base, slot_id);
-    return n >= 0 && (size_t) n < size;
+    while (*cursor != '\0') {
+        while (*cursor == '/') {
+            ++cursor;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+
+        const char *end = cursor;
+        while (*end != '\0' && *end != '/') {
+            ++end;
+        }
+
+        size_t component_len = (size_t) (end - cursor);
+        if (component_len == 0u || component_len >= SEC_PATH_MAX ||
+            (component_len == 1u && cursor[0] == '.') ||
+            (component_len == 2u && cursor[0] == '.' && cursor[1] == '.')) {
+            (void) close(dirfd);
+            errno = EINVAL;
+            return -1;
+        }
+
+        char component[SEC_PATH_MAX];
+        memcpy(component, cursor, component_len);
+        component[component_len] = '\0';
+
+        int nextfd = openat(dirfd, component,
+                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (nextfd < 0 && errno == ENOENT && create) {
+            if (mkdirat(dirfd, component, SEC_DIR_MODE) != 0 &&
+                errno != EEXIST) {
+                int saved_errno = errno;
+                (void) close(dirfd);
+                errno = saved_errno;
+                return -1;
+            }
+            nextfd = openat(dirfd, component,
+                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        }
+        if (nextfd < 0) {
+            int saved_errno = errno;
+            (void) close(dirfd);
+            errno = saved_errno;
+            return -1;
+        }
+
+        struct stat next_st;
+        if (fstat(nextfd, &next_st) != 0) {
+            int saved_errno = errno;
+            (void) close(nextfd);
+            (void) close(dirfd);
+            errno = saved_errno;
+            return -1;
+        }
+        if (!sec_stat_is_directory_component(&next_st)) {
+            (void) close(nextfd);
+            (void) close(dirfd);
+            errno = EACCES;
+            return -1;
+        }
+
+        (void) close(dirfd);
+        dirfd  = nextfd;
+        cursor = end;
+    }
+
+    struct stat st;
+    if (fstat(dirfd, &st) != 0) {
+        int saved_errno = errno;
+        (void) close(dirfd);
+        errno = saved_errno;
+        return -1;
+    }
+    if (!sec_stat_is_directory(&st)) {
+        (void) close(dirfd);
+        errno = EACCES;
+        return -1;
+    }
+
+    return dirfd;
+}
+
+static bool sec_make_name(actrust_sec_slot_t slot_id, char *name, size_t size)
+{
+    int n = snprintf(name, size, "sec_%08x.bin", slot_id);
+    return n > 0 && (size_t) n < size;
+}
+
+static bool sec_make_temp_name(actrust_sec_slot_t slot_id, char *name,
+                               size_t size, unsigned int sequence)
+{
+    int n = snprintf(name, size, ".sec_%08x.%ld.%u.tmp", slot_id,
+                     (long) getpid(), sequence);
+    return n > 0 && (size_t) n < size;
+}
+
+static bool sec_make_backup_name(actrust_sec_slot_t slot_id, char *name,
+                                 size_t size, unsigned int sequence)
+{
+    int n = snprintf(name, size, ".sec_%08x.%ld.%u.old", slot_id,
+                     (long) getpid(), sequence);
+    return n > 0 && (size_t) n < size;
 }
 
 /**
@@ -222,13 +285,88 @@ static size_t sec_read_all(int fd, uint8_t *buf, size_t len)
         }
 
         if (n == 0) {
-            break;
+            return (size_t) -1;
         }
 
         total += (size_t) n;
     }
 
     return total;
+}
+
+static bool sec_copy_file(int srcfd, int dstfd, off_t size)
+{
+    uint8_t   buffer[4096];
+    uintmax_t remaining = (uintmax_t) size;
+
+    while (remaining > 0u) {
+        size_t chunk =
+            remaining > sizeof(buffer) ? sizeof(buffer) : (size_t) remaining;
+        ssize_t n = read(srcfd, buffer, chunk);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (n == 0 || !sec_write_all(dstfd, buffer, (size_t) n)) {
+            return false;
+        }
+        remaining -= (uintmax_t) n;
+    }
+
+    return true;
+}
+
+static bool sec_create_backup(int dirfd, const char *name,
+                              const char *backup_name)
+{
+    int         srcfd       = -1;
+    int         dstfd       = -1;
+    bool        created     = false;
+    bool        success     = false;
+    off_t       source_size = 0;
+    struct stat st;
+
+    srcfd = openat(dirfd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (srcfd < 0 || fstat(srcfd, &st) != 0 || !sec_stat_is_regular(&st) ||
+        st.st_size < 0 || (uintmax_t) st.st_size > (uintmax_t) SIZE_MAX) {
+        goto cleanup;
+    }
+    source_size = st.st_size;
+
+    dstfd = openat(dirfd, backup_name,
+                   O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                   SEC_FILE_MODE);
+    if (dstfd < 0) {
+        goto cleanup;
+    }
+    created = true;
+
+    if (fstat(dstfd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        fchmod(dstfd, SEC_FILE_MODE) != 0 || lseek(srcfd, 0, SEEK_SET) < 0 ||
+        !sec_copy_file(srcfd, dstfd, source_size) || fsync(dstfd) != 0) {
+        goto cleanup;
+    }
+
+    success = true;
+
+cleanup: {
+    int saved_errno = errno;
+    if (srcfd >= 0 && close(srcfd) != 0) {
+        success = false;
+    }
+    if (dstfd >= 0 && close(dstfd) != 0) {
+        success = false;
+    }
+    if (!success && created) {
+        (void) unlinkat(dirfd, backup_name, 0);
+    }
+    if (!success) {
+        errno = saved_errno;
+    }
+}
+    return success;
 }
 
 /* ========================================================================
@@ -242,37 +380,146 @@ actrust_err_t actrust_sec_store_write(actrust_sec_slot_t slot_id,
         return SEC_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    char path[SEC_PATH_MAX];
-    if (!sec_build_path(slot_id, path, sizeof(path))) {
+    int dirfd = sec_open_store_dir(true);
+    if (dirfd < 0) {
         return SEC_ERR(ACTRUST_ERR_IO);
     }
 
-    int fd =
-        open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, SEC_FILE_MODE);
+    if (flock(dirfd, LOCK_EX) != 0) {
+        (void) close(dirfd);
+        return SEC_ERR(ACTRUST_ERR_IO);
+    }
+
+    char name[SEC_PATH_MAX];
+    char temp_name[SEC_PATH_MAX];
+    if (!sec_make_name(slot_id, name, sizeof(name))) {
+        (void) flock(dirfd, LOCK_UN);
+        (void) close(dirfd);
+        return SEC_ERR(ACTRUST_ERR_IO);
+    }
+    int fd = -1;
+    for (unsigned int sequence = 0u; sequence < 100u; ++sequence) {
+        if (!sec_make_temp_name(slot_id, temp_name, sizeof(temp_name),
+                                sequence)) {
+            (void) flock(dirfd, LOCK_UN);
+            (void) close(dirfd);
+            return SEC_ERR(ACTRUST_ERR_IO);
+        }
+        fd = openat(dirfd, temp_name,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                    SEC_FILE_MODE);
+        if (fd >= 0 || errno != EEXIST) {
+            break;
+        }
+    }
     if (fd < 0) {
+        (void) flock(dirfd, LOCK_UN);
+        (void) close(dirfd);
         return SEC_ERR(ACTRUST_ERR_IO);
     }
 
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+    struct stat  st;
+    bool         success         = false;
+    bool         backup_created  = false;
+    bool         renamed         = false;
+    bool         old_exists      = false;
+    bool         preserve_backup = false;
+    char         backup_name[SEC_PATH_MAX];
+    unsigned int backup_sequence = 0u;
+    if (!sec_make_backup_name(slot_id, backup_name, sizeof(backup_name),
+                              backup_sequence)) {
         (void) close(fd);
+        (void) unlinkat(dirfd, temp_name, 0);
+        (void) flock(dirfd, LOCK_UN);
+        (void) close(dirfd);
         return SEC_ERR(ACTRUST_ERR_IO);
     }
+    actrust_err_t result = SEC_ERR(ACTRUST_ERR_IO);
 
-    if (fchmod(fd, SEC_FILE_MODE) != 0) {
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        fchmod(fd, SEC_FILE_MODE) != 0 || !sec_write_all(fd, data, len) ||
+        fsync(fd) != 0) {
+        goto cleanup;
+    }
+
+    if (close(fd) != 0) {
+        fd = -1;
+        goto cleanup;
+    }
+    fd = -1;
+
+    if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+        if (!sec_stat_is_regular(&st)) {
+            errno = EACCES;
+            goto cleanup;
+        }
+        old_exists = true;
+
+        for (backup_sequence = 0u; backup_sequence < 100u; ++backup_sequence) {
+            if (!sec_make_backup_name(slot_id, backup_name, sizeof(backup_name),
+                                      backup_sequence)) {
+                goto cleanup;
+            }
+            if (sec_create_backup(dirfd, name, backup_name)) {
+                backup_created = true;
+                break;
+            }
+            if (errno != EEXIST) {
+                goto cleanup;
+            }
+        }
+        if (!backup_created) {
+            goto cleanup;
+        }
+    } else if (errno != ENOENT) {
+        goto cleanup;
+    }
+
+    if (renameat(dirfd, temp_name, dirfd, name) != 0) {
+        goto cleanup;
+    }
+    renamed = true;
+
+    if (fsync(dirfd) != 0) {
+        goto rollback;
+    }
+
+    if (backup_created && unlinkat(dirfd, backup_name, 0) != 0) {
+        goto rollback;
+    }
+    backup_created = false;
+
+    success = true;
+    result  = ACTRUST_OK;
+    goto cleanup;
+
+rollback:
+    if (renamed) {
+        if (backup_created) {
+            if (renameat(dirfd, backup_name, dirfd, name) == 0) {
+                backup_created = false;
+            } else {
+                preserve_backup = true;
+            }
+        } else if (!old_exists) {
+            (void) unlinkat(dirfd, name, 0);
+        }
+    }
+    (void) fsync(dirfd);
+
+cleanup:
+    if (fd >= 0) {
         (void) close(fd);
-        (void) unlink(path);
-        return SEC_ERR(ACTRUST_ERR_IO);
     }
-
-    if (!sec_write_all(fd, data, len)) {
-        (void) close(fd);
-        (void) unlink(path);
-        return SEC_ERR(ACTRUST_ERR_IO);
+    if (!renamed) {
+        (void) unlinkat(dirfd, temp_name, 0);
     }
-
-    (void) close(fd);
-    return ACTRUST_OK;
+    if (backup_created && !preserve_backup) {
+        (void) unlinkat(dirfd, backup_name, 0);
+    }
+    (void) flock(dirfd, LOCK_UN);
+    (void) close(dirfd);
+    return success ? ACTRUST_OK : result;
 }
 
 actrust_err_t actrust_sec_store_read(actrust_sec_slot_t slot_id, uint8_t *out,
@@ -282,34 +529,47 @@ actrust_err_t actrust_sec_store_read(actrust_sec_slot_t slot_id, uint8_t *out,
         return SEC_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    char path[SEC_PATH_MAX];
-    if (!sec_build_path(slot_id, path, sizeof(path))) {
+    int dirfd = sec_open_store_dir(false);
+    if (dirfd < 0) {
+        return SEC_ERR(errno == ENOENT ? ACTRUST_ERR_NO_RESOURCE
+                                       : ACTRUST_ERR_IO);
+    }
+
+    char name[SEC_PATH_MAX];
+    if (!sec_make_name(slot_id, name, sizeof(name))) {
+        (void) close(dirfd);
         return SEC_ERR(ACTRUST_ERR_IO);
     }
 
-    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    int fd = openat(dirfd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) {
-        return SEC_ERR(ACTRUST_ERR_NO_RESOURCE);
+        actrust_err_t result =
+            SEC_ERR(errno == ENOENT ? ACTRUST_ERR_NO_RESOURCE : ACTRUST_ERR_IO);
+        (void) close(dirfd);
+        return result;
     }
 
     struct stat st;
-    if (fstat(fd, &st) != 0) {
+    if (fstat(fd, &st) != 0 || !sec_stat_is_regular(&st) || st.st_size < 0 ||
+        (uintmax_t) st.st_size > (uintmax_t) SIZE_MAX) {
         (void) close(fd);
+        (void) close(dirfd);
         return SEC_ERR(ACTRUST_ERR_IO);
     }
 
     size_t file_size = (size_t) st.st_size;
-
     if (file_size > out_len) {
         (void) close(fd);
+        (void) close(dirfd);
         *actual_len = file_size;
         return SEC_ERR(ACTRUST_ERR_BUF_TOO_SMALL);
     }
 
-    size_t n = sec_read_all(fd, out, file_size);
-    (void) close(fd);
+    size_t n        = sec_read_all(fd, out, file_size);
+    bool   close_ok = close(fd) == 0;
+    (void) close(dirfd);
 
-    if (n == (size_t) -1) {
+    if (n == (size_t) -1 || !close_ok) {
         return SEC_ERR(ACTRUST_ERR_IO);
     }
 
@@ -319,19 +579,49 @@ actrust_err_t actrust_sec_store_read(actrust_sec_slot_t slot_id, uint8_t *out,
 
 actrust_err_t actrust_sec_store_delete(actrust_sec_slot_t slot_id)
 {
-    char path[SEC_PATH_MAX];
-    if (!sec_build_path(slot_id, path, sizeof(path))) {
+    int dirfd = sec_open_store_dir(false);
+    if (dirfd < 0) {
+        return SEC_ERR(errno == ENOENT ? ACTRUST_ERR_NO_RESOURCE
+                                       : ACTRUST_ERR_IO);
+    }
+
+    if (flock(dirfd, LOCK_EX) != 0) {
+        (void) close(dirfd);
         return SEC_ERR(ACTRUST_ERR_IO);
     }
 
-    if (unlink(path) != 0) {
-        if (errno == ENOENT) {
-            return SEC_ERR(ACTRUST_ERR_NO_RESOURCE);
-        }
+    char name[SEC_PATH_MAX];
+    if (!sec_make_name(slot_id, name, sizeof(name))) {
+        (void) flock(dirfd, LOCK_UN);
+        (void) close(dirfd);
         return SEC_ERR(ACTRUST_ERR_IO);
     }
 
-    return ACTRUST_OK;
+    struct stat st;
+    if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+        actrust_err_t result =
+            SEC_ERR(errno == ENOENT ? ACTRUST_ERR_NO_RESOURCE : ACTRUST_ERR_IO);
+        (void) flock(dirfd, LOCK_UN);
+        (void) close(dirfd);
+        return result;
+    }
+    if (!sec_stat_is_regular(&st)) {
+        (void) flock(dirfd, LOCK_UN);
+        (void) close(dirfd);
+        return SEC_ERR(ACTRUST_ERR_IO);
+    }
+
+    if (unlinkat(dirfd, name, 0) != 0) {
+        actrust_err_t result =
+            SEC_ERR(errno == ENOENT ? ACTRUST_ERR_NO_RESOURCE : ACTRUST_ERR_IO);
+        (void) flock(dirfd, LOCK_UN);
+        (void) close(dirfd);
+        return result;
+    }
+
+    bool sync_ok  = fsync(dirfd) == 0;
+    bool close_ok = (flock(dirfd, LOCK_UN) == 0) && (close(dirfd) == 0);
+    return sync_ok && close_ok ? ACTRUST_OK : SEC_ERR(ACTRUST_ERR_IO);
 }
 
 /* ========================================================================

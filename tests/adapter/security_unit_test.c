@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -31,11 +32,25 @@ static void security_test_remove_path(const char *suffix)
     }
 }
 
+static void security_test_cleanup_temp_files(void)
+{
+    char command[384];
+    int  n = snprintf(command, sizeof(command),
+                      "find '%s/.actrust/security' -maxdepth 1 -type f "
+                       "-name '.sec_*.tmp' -delete -o -name '.sec_*.old' "
+                       "-delete 2>/dev/null",
+                      test_home);
+    if (n > 0 && (size_t) n < sizeof(command)) {
+        (void) system(command);
+    }
+}
+
 static void security_test_cleanup_home(void)
 {
     security_test_remove_path(".actrust/security/sec_00002007.bin");
     security_test_remove_path(".actrust/security/sec_00002008.bin");
     security_test_remove_path(".actrust/security/sec_00002009.bin");
+    security_test_cleanup_temp_files();
     security_test_remove_path("target_secret");
     security_test_remove_path(".actrust/security");
     security_test_remove_path(".actrust");
@@ -177,6 +192,71 @@ void test_store_write_rejects_slot_symlink(void)
     TEST_ASSERT_EQUAL(ACTRUST_ERR_IO, ACTRUST_ERR_CODE(err));
 }
 
+void test_store_failed_update_preserves_previous_value(void)
+{
+    const uint8_t old_data[] = { 0x11u, 0x22u };
+    const uint8_t new_data[] = { 0x33u, 0x44u, 0x55u };
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sec_store_write(TEST_SLOT, old_data,
+                                                          sizeof(old_data)));
+
+    char path[320];
+    int  n = snprintf(path, sizeof(path),
+                      "%s/.actrust/security/sec_00002007.bin", test_home);
+    TEST_ASSERT_TRUE(n > 0 && (size_t) n < sizeof(path));
+    TEST_ASSERT_EQUAL_INT(0, chmod(path, 0400));
+
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_IO,
+                      ACTRUST_ERR_CODE(actrust_sec_store_write(
+                          TEST_SLOT, new_data, sizeof(new_data))));
+
+    TEST_ASSERT_EQUAL_INT(0, chmod(path, 0600));
+    uint8_t buf[8] = { 0 };
+    size_t  actual = 0;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sec_store_read(TEST_SLOT, buf,
+                                                         sizeof(buf), &actual));
+    TEST_ASSERT_EQUAL(sizeof(old_data), actual);
+    TEST_ASSERT_EQUAL_MEMORY(old_data, buf, sizeof(old_data));
+}
+
+void test_store_rejects_nonregular_slot(void)
+{
+    security_test_cleanup_home();
+    const uint8_t data[] = { 0x01u };
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_sec_store_write(TEST_SLOT, data, sizeof(data)));
+
+    char path[320];
+    int  n = snprintf(path, sizeof(path),
+                      "%s/.actrust/security/sec_00002007.bin", test_home);
+    TEST_ASSERT_TRUE(n > 0 && (size_t) n < sizeof(path));
+    TEST_ASSERT_EQUAL_INT(0, unlink(path));
+    TEST_ASSERT_EQUAL_INT(0, mkdir(path, 0700));
+
+    uint8_t buf[8];
+    size_t  actual = 0;
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_IO,
+                      ACTRUST_ERR_CODE(actrust_sec_store_read(
+                          TEST_SLOT, buf, sizeof(buf), &actual)));
+}
+
+void test_store_delete_rejects_nonregular_slot(void)
+{
+    security_test_cleanup_home();
+    const uint8_t data[] = { 0x01u };
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_sec_store_write(TEST_SLOT, data, sizeof(data)));
+
+    char path[320];
+    int  n = snprintf(path, sizeof(path),
+                      "%s/.actrust/security/sec_00002007.bin", test_home);
+    TEST_ASSERT_TRUE(n > 0 && (size_t) n < sizeof(path));
+    TEST_ASSERT_EQUAL_INT(0, unlink(path));
+    TEST_ASSERT_EQUAL_INT(0, mkdir(path, 0700));
+
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_IO,
+                      ACTRUST_ERR_CODE(actrust_sec_store_delete(TEST_SLOT)));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -188,5 +268,8 @@ int main(void)
     RUN_TEST(test_store_delete_then_read);
     RUN_TEST(test_store_write_rejects_file_in_parent_path);
     RUN_TEST(test_store_write_rejects_slot_symlink);
+    RUN_TEST(test_store_failed_update_preserves_previous_value);
+    RUN_TEST(test_store_rejects_nonregular_slot);
+    RUN_TEST(test_store_delete_rejects_nonregular_slot);
     return UNITY_END();
 }
