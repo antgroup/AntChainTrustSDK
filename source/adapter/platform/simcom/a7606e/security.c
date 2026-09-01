@@ -5,11 +5,11 @@
  * @file security.c
  * @brief SIMCom A7606E-H platform security adapter implementation
  *
- * Implements the AntChainTrustSDK secure storage interface using the Sunsea TEE
- * on the A7606E-H (ASR1806 SoC).  Random bytes are sourced from the
+ * Implements the AntChainTrustSDK security interface for the A7606E-H. Secure
+ * opaque data storage uses the Sunsea TEE. Random bytes are sourced from the
  * getrandom(2) software CSPRNG (the TEE provides no entropy service). Key
- * management and crypto operations return UNSUPPORTED because the TEE provides
- * RSA/AES only while the AntChainTrustSDK interface requires ECDSA.
+ * management and crypto operations return UNSUPPORTED because the available
+ * TEE interface does not provide the ECDSA services required by this SDK.
  */
 
 /* C standard */
@@ -178,6 +178,9 @@ actrust_err_t actrust_sec_store_delete(actrust_sec_slot_t slot_id)
 
 /* ========================================================================
  * Random number generation - getrandom(2) software CSPRNG
+ *
+ * This service is callable through the adapter, but is not reported as a
+ * hardware or TEE capability in actrust_sec_get_capabilities().
  * ======================================================================== */
 
 actrust_err_t actrust_sec_random(uint8_t *out, size_t len)

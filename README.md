@@ -123,7 +123,18 @@ export ACTRUST_TOOLCHAIN_PATH=/path/to/arm-openwrt-linux
 
 The default toolchain file is `cmake/toolchain-simcom-a7606e.cmake`. Set
 `ACTRUST_TOOLCHAIN_PATH` to point at the unpacked OpenWrt toolchain root (the
-directory that contains `bin/arm-openwrt-linux-muslgnueabi-gcc`).
+directory that contains `bin/arm-openwrt-linux-muslgnueabi-gcc`). The configure
+step also requires the target sysroot and the vendor libraries `sdk`, `log`,
+`uci`, `sunseasdk`, `teec`, and `crypto`; missing dependencies are reported
+before compilation.
+
+The SIMCom security adapter uses Sunsea TEE secure-data storage. Its random
+service uses the Linux kernel `getrandom(2)` software CSPRNG, not a TEE/TRNG,
+and therefore the SIMCom profile does not advertise hardware random, secure key
+management, ECDSA, hash, or AES capabilities. Those key and crypto adapter APIs
+return `ACTRUST_ERR_UNSUPPORTED`; the development crypto profile uses software
+backends. A strict production hardware-key profile is unavailable until a
+vendor-supported non-exportable ECDSA/key-management interface is provided.
 
 ---
 
