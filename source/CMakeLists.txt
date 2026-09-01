@@ -59,6 +59,51 @@ if(ACTRUST_ENABLE_SANITIZERS)
 endif()
 
 # =============================================================================
+# Configuration capability validation
+# =============================================================================
+
+set(ACTRUST_PLATFORM_COUNT 0)
+foreach(
+    platform_symbol
+    CONFIG_ACTRUST_ADAPTER_PLATFORM_LINUX
+    CONFIG_ACTRUST_ADAPTER_PLATFORM_ANDROID
+    CONFIG_ACTRUST_ADAPTER_PLATFORM_SIMCOM_A7606E
+)
+    if(${platform_symbol})
+        math(EXPR ACTRUST_PLATFORM_COUNT "${ACTRUST_PLATFORM_COUNT} + 1")
+    endif()
+endforeach()
+if(NOT ACTRUST_PLATFORM_COUNT EQUAL 1)
+    message(
+        FATAL_ERROR
+        "AntChainTrustSDK requires exactly one adapter platform"
+    )
+endif()
+
+foreach(
+    required_backend
+    CONFIG_ACTRUST_3RDPARTS_CRYPTO_MBEDTLS
+    CONFIG_ACTRUST_3RDPARTS_MQTT_COREMQTT
+    CONFIG_ACTRUST_3RDPARTS_JSON_COREJSON
+    CONFIG_ACTRUST_3RDPARTS_NTP_CORESNTP
+    CONFIG_ACTRUST_3RDPARTS_BACKOFF_BACKOFFALGO
+)
+    if(NOT DEFINED ${required_backend} OR NOT ${required_backend})
+        message(
+            FATAL_ERROR
+            "AntChainTrustSDK configuration requires ${required_backend}=y"
+        )
+    endif()
+endforeach()
+
+if(NOT CONFIG_ACTRUST_JSON_BACKEND_COREJSON)
+    message(
+        FATAL_ERROR
+        "AntChainTrustSDK JSON component requires coreJSON backend"
+    )
+endif()
+
+# =============================================================================
 # Subdirectories
 # =============================================================================
 

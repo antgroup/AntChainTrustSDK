@@ -156,6 +156,18 @@ function(actrust_add_test)
 endfunction()
 
 # -----------------------------------------------------------------------------
+# Configuration schema validation
+# -----------------------------------------------------------------------------
+add_test(
+    NAME config_validate_test
+    COMMAND bash "${CMAKE_CURRENT_LIST_DIR}/config_validate_test.sh"
+)
+set_tests_properties(
+    config_validate_test
+    PROPERTIES LABELS "actrust;config;unit"
+)
+
+# -----------------------------------------------------------------------------
 # Shared test helper unit test
 # -----------------------------------------------------------------------------
 add_executable(
