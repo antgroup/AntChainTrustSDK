@@ -154,6 +154,34 @@ void test_cert_id_maps_to_cert_slot(void)
     TEST_ASSERT_EQUAL_UINT32(0xFFFFFFFFu, certid_to_slotid(0xFFFFFFFFu));
 }
 
+void test_key_roles_use_distinct_slots(void)
+{
+    const actrust_crypto_key_desc_t *claim =
+        actrust_crypto_key_lookup(ACTRUST_CRYPTO_KEY_ID_EC_0);
+    const actrust_crypto_key_desc_t *runtime =
+        actrust_crypto_key_lookup(ACTRUST_CRYPTO_KEY_ID_EC_1);
+    const actrust_crypto_key_desc_t *signing =
+        actrust_crypto_key_lookup(ACTRUST_CRYPTO_KEY_ID_EC_2);
+
+    TEST_ASSERT_NOT_NULL(claim);
+    TEST_ASSERT_NOT_NULL(runtime);
+    TEST_ASSERT_NOT_NULL(signing);
+    TEST_ASSERT_EQUAL_UINT8(0u, claim->slot_index);
+    TEST_ASSERT_EQUAL_UINT8(1u, runtime->slot_index);
+    TEST_ASSERT_EQUAL_UINT8(3u, signing->slot_index);
+    TEST_ASSERT_NOT_EQUAL(claim->slot_index, runtime->slot_index);
+    TEST_ASSERT_NOT_EQUAL(claim->slot_index, signing->slot_index);
+    TEST_ASSERT_NOT_EQUAL(runtime->slot_index, signing->slot_index);
+    TEST_ASSERT_EQUAL(ACTRUST_CRYPTO_BACKEND_SW, claim->backend);
+    TEST_ASSERT_EQUAL(ACTRUST_CRYPTO_BACKEND_SW, runtime->backend);
+    TEST_ASSERT_EQUAL(ACTRUST_CRYPTO_BACKEND_SW, signing->backend);
+}
+
+void test_security_capabilities_match_reference_adapter(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(0u, actrust_sec_get_capabilities());
+}
+
 void test_cert_storage_roundtrip(void)
 {
     const uint8_t cert[] = "-----BEGIN CERTIFICATE-----\nA\n";
@@ -609,6 +637,8 @@ int main(void)
     RUN_TEST(test_random_nonzero);
     RUN_TEST(test_random_large_request);
     RUN_TEST(test_cert_id_maps_to_cert_slot);
+    RUN_TEST(test_key_roles_use_distinct_slots);
+    RUN_TEST(test_security_capabilities_match_reference_adapter);
     RUN_TEST(test_cert_storage_roundtrip);
     RUN_TEST(test_cert_storage_rejects_invalid_args);
     RUN_TEST(test_hash_sha256);

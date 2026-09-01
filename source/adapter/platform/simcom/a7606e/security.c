@@ -39,6 +39,11 @@
 /** @brief Size of the big-endian length prefix prepended to stored data */
 #define SEC_LEN_PREFIX 4
 
+actrust_sec_capabilities_t actrust_sec_get_capabilities(void)
+{
+    return 0u;
+}
+
 /*
  * Declare the Sunsea TEE functions directly to avoid pulling in Sunsea_TEE.h
  * and its type definitions that may conflict with project headers.

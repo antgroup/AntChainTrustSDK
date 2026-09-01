@@ -65,6 +65,8 @@
 #define CORE_KV_KEY_REGISTERED                                                 \
     "registered" /*!< KV key for registration status */
 
+#define CORE_SIGNING_KEY_ID ACTRUST_CLOUD_SIGNING_KEY_ID
+
 /* Downlink task configuration */
 #define CORE_DOWNLINK_STACK_SIZE      4096u /*!< Stack size for downlink task */
 #define CORE_DOWNLINK_PRIORITY        5u    /*!< Priority for downlink task */
@@ -487,10 +489,40 @@ static actrust_err_t core_store_claim_credentials(actrust_core_ctx_t  *ctx,
     return ACTRUST_OK;
 }
 
+static actrust_err_t core_prepare_signing_key(actrust_core_ctx_t *ctx,
+                                              bool local_registered)
+{
+    actrust_err_t err = actrust_crypto_key_open(
+        ctx->crypto, CORE_SIGNING_KEY_ID, &ctx->sign_key);
+    if (err == ACTRUST_OK) {
+        return ACTRUST_OK;
+    }
+    if (!local_registered || ACTRUST_ERR_CODE(err) != ACTRUST_ERR_NO_RESOURCE) {
+        if (!local_registered) {
+            LOG_DEBUG("no existing signing key (first boot): 0x%08" PRIx32,
+                      err);
+            return ACTRUST_OK;
+        }
+        return err;
+    }
+
+    /* Older releases used EC_0 for the device signer. Preserve that key while
+     * copying it into the dedicated signer slot; claim credentials remain in
+     * their own slot and are never deleted by this migration. */
+    err = actrust_crypto_key_migrate(ctx->crypto, ACTRUST_CRYPTO_KEY_ID_EC_0,
+                                     CORE_SIGNING_KEY_ID);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+    return actrust_crypto_key_open(ctx->crypto, CORE_SIGNING_KEY_ID,
+                                   &ctx->sign_key);
+}
+
 actrust_err_t core_ops_init(actrust_job_t *job)
 {
     actrust_core_ctx_t *ctx = core_get_ctx();
     actrust_err_t       err;
+    bool                local_registered = false;
 
     /* actrust_kv_init is a global one-shot initialiser with no matching
      * deinit; on failure there is nothing to roll back. */
@@ -506,6 +538,15 @@ actrust_err_t core_ops_init(actrust_job_t *job)
         return err;
     }
 
+    err = core_read_local_registered(&local_registered);
+    if (ACTRUST_IS_ERR(err) &&
+        ACTRUST_ERR_CODE(err) != ACTRUST_ERR_NO_RESOURCE) {
+        goto fail_crypto;
+    }
+    if (ACTRUST_ERR_CODE(err) == ACTRUST_ERR_NO_RESOURCE) {
+        local_registered = false;
+    }
+
     err = actrust_ntp_init(&ctx->ntp);
     if (ACTRUST_IS_ERR(err)) {
         goto fail_crypto;
@@ -517,18 +558,14 @@ actrust_err_t core_ops_init(actrust_job_t *job)
         goto fail_ntp;
     }
 
-    err = core_store_claim_credentials(ctx, job);
+    err = core_prepare_signing_key(ctx, local_registered);
     if (ACTRUST_IS_ERR(err)) {
         goto fail_cloud;
     }
 
-    /* Try to open an existing signing key (succeeds if already registered).
-     * A missing key on first boot is expected, so we only log and continue. */
-    actrust_err_t key_err = actrust_crypto_key_open(
-        ctx->crypto, ACTRUST_CRYPTO_KEY_ID_EC_0, &ctx->sign_key);
-    if (ACTRUST_IS_ERR(key_err)) {
-        LOG_DEBUG("no existing signing key (first boot): 0x%08" PRIx32,
-                  key_err);
+    err = core_store_claim_credentials(ctx, job);
+    if (ACTRUST_IS_ERR(err)) {
+        goto fail_cloud;
     }
 
     core_set_state(ACTRUST_CORE_READY);
@@ -706,10 +743,13 @@ actrust_err_t core_ops_connect(actrust_job_t *job)
 
     if (local_registered && ctx->sign_key != NULL) {
         core_set_state(ACTRUST_CORE_REGISTERED);
+    } else if (local_registered) {
+        /* EC_0 is the claim/bootstrap key in the separated role model. Do not
+         * reuse or destroy it when an old device-signing key is unavailable. */
+        LOG_ERROR("registered marker exists without device signing key");
+        err = CORE_ERR(ACTRUST_ERR_UNSUPPORTED);
+        goto fail;
     } else {
-        if (local_registered && ctx->sign_key == NULL) {
-            LOG_WARN("local registration marker exists without signing key");
-        }
         core_set_state(ACTRUST_CORE_UNREGISTERED);
     }
 
@@ -960,7 +1000,7 @@ static actrust_err_t core_register_make_keypair(actrust_core_ctx_t *ctx,
                                                 size_t pubkey_hex_cap)
 {
     actrust_err_t err = actrust_crypto_key_generate(
-        ctx->crypto, ACTRUST_CRYPTO_KEY_ID_EC_0, &ctx->sign_key);
+        ctx->crypto, CORE_SIGNING_KEY_ID, &ctx->sign_key);
     if (ACTRUST_IS_ERR(err)) {
         return err;
     }
@@ -1191,8 +1231,7 @@ out:
     if (ACTRUST_IS_ERR(err)) {
         (void) actrust_crypto_key_close(ctx->crypto, &ctx->sign_key);
         ctx->sign_key = NULL;
-        (void) actrust_crypto_key_destroy(ctx->crypto,
-                                          ACTRUST_CRYPTO_KEY_ID_EC_0);
+        (void) actrust_crypto_key_destroy(ctx->crypto, CORE_SIGNING_KEY_ID);
     }
     core_lock();
     ctx->reg.in_progress    = false;

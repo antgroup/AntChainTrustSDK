@@ -33,25 +33,56 @@
 /* --- Key descriptor table ------------------------------------------------ */
 const actrust_crypto_key_desc_t g_key_table[ACTRUST_CRYPTO_KEY_ID_COUNT] = {
     {
-        .key_id     = ACTRUST_CRYPTO_KEY_ID_EC_0,
-        .type       = ACTRUST_CRYPTO_KEY_EC,
-        .backend    = ACTRUST_CRYPTO_BACKEND_SW,
-        .slot_index = 0,
-        .spec.curve = ACTRUST_CRYPTO_EC_SECP256R1,
+        .key_id = ACTRUST_CRYPTO_KEY_ID_EC_0,
+        .type   = ACTRUST_CRYPTO_KEY_EC,
+#if defined(CONFIG_ACTRUST_CRYPTO_KEY_PROFILE_PRODUCTION)
+        .backend = ACTRUST_CRYPTO_BACKEND_HW,
+#else
+        .backend = ACTRUST_CRYPTO_BACKEND_SW,
+#endif
+        .slot_index        = 0,
+        .requires_key_mgmt = true,
+        .requires_ecdsa    = true,
+        .spec.curve        = ACTRUST_CRYPTO_EC_SECP256R1,
     },
     {
-        .key_id     = ACTRUST_CRYPTO_KEY_ID_EC_1,
-        .type       = ACTRUST_CRYPTO_KEY_EC,
-        .backend    = ACTRUST_CRYPTO_BACKEND_SW,
-        .slot_index = 1,
-        .spec.curve = ACTRUST_CRYPTO_EC_SECP256R1,
+        .key_id = ACTRUST_CRYPTO_KEY_ID_EC_1,
+        .type   = ACTRUST_CRYPTO_KEY_EC,
+#if defined(CONFIG_ACTRUST_CRYPTO_KEY_PROFILE_PRODUCTION)
+        .backend = ACTRUST_CRYPTO_BACKEND_HW,
+#else
+        .backend = ACTRUST_CRYPTO_BACKEND_SW,
+#endif
+        .slot_index        = 1,
+        .requires_key_mgmt = true,
+        .requires_ecdsa    = true,
+        .spec.curve        = ACTRUST_CRYPTO_EC_SECP256R1,
     },
     {
-        .key_id        = ACTRUST_CRYPTO_KEY_ID_AES_0,
-        .type          = ACTRUST_CRYPTO_KEY_AES,
-        .backend       = ACTRUST_CRYPTO_BACKEND_SW,
-        .slot_index    = 2,
-        .spec.key_bits = 256,
+        .key_id = ACTRUST_CRYPTO_KEY_ID_AES_0,
+        .type   = ACTRUST_CRYPTO_KEY_AES,
+#if defined(CONFIG_ACTRUST_CRYPTO_KEY_PROFILE_PRODUCTION)
+        .backend = ACTRUST_CRYPTO_BACKEND_HW,
+#else
+        .backend = ACTRUST_CRYPTO_BACKEND_SW,
+#endif
+        .slot_index        = 2,
+        .requires_key_mgmt = true,
+        .requires_aes      = true,
+        .spec.key_bits     = 256,
+    },
+    {
+        .key_id = ACTRUST_CRYPTO_KEY_ID_EC_2,
+        .type   = ACTRUST_CRYPTO_KEY_EC,
+#if defined(CONFIG_ACTRUST_CRYPTO_KEY_PROFILE_PRODUCTION)
+        .backend = ACTRUST_CRYPTO_BACKEND_HW,
+#else
+        .backend = ACTRUST_CRYPTO_BACKEND_SW,
+#endif
+        .slot_index        = 3,
+        .requires_key_mgmt = true,
+        .requires_ecdsa    = true,
+        .spec.curve        = ACTRUST_CRYPTO_EC_SECP256R1,
     },
 };
 
@@ -143,6 +174,32 @@ actrust_err_t actrust_crypto_cert_delete(uint32_t cert_id)
     return actrust_sec_store_delete(ACTRUST_SEC_SLOT_CERT(desc->slot_index));
 }
 
+static actrust_err_t actrust_crypto_validate_descriptors(void)
+{
+    const actrust_sec_capabilities_t caps = actrust_sec_get_capabilities();
+
+    for (size_t i = 0; i < ACTRUST_CRYPTO_KEY_ID_COUNT; ++i) {
+        const actrust_crypto_key_desc_t *desc = &g_key_table[i];
+        if (desc->slot_index >= ACTRUST_SEC_SLOT_KEY_COUNT) {
+            return CRYPTO_ERR(ACTRUST_ERR_UNSUPPORTED);
+        }
+        if (desc->backend == ACTRUST_CRYPTO_BACKEND_HW) {
+            if (desc->requires_key_mgmt &&
+                (caps & ACTRUST_SEC_CAP_KEY_MGMT) == 0u) {
+                return CRYPTO_ERR(ACTRUST_ERR_UNSUPPORTED);
+            }
+            if (desc->requires_ecdsa && (caps & ACTRUST_SEC_CAP_ECDSA) == 0u) {
+                return CRYPTO_ERR(ACTRUST_ERR_UNSUPPORTED);
+            }
+            if (desc->requires_aes && (caps & ACTRUST_SEC_CAP_AES) == 0u) {
+                return CRYPTO_ERR(ACTRUST_ERR_UNSUPPORTED);
+            }
+        }
+    }
+
+    return ACTRUST_OK;
+}
+
 static inline const crypto_backend_ops_t *actrust_crypto_get_ops(
     actrust_crypto_ctx_t ctx, const actrust_crypto_key_desc_t *desc)
 {
@@ -159,6 +216,14 @@ actrust_err_t actrust_crypto_init(actrust_crypto_ctx_t *ctx)
         return CRYPTO_ERR(ACTRUST_ERR_INVALID_ARG);
     }
     *ctx = NULL;
+
+    actrust_err_t descriptor_err = actrust_crypto_validate_descriptors();
+    if (descriptor_err != ACTRUST_OK) {
+        LOG_ERROR(
+            "crypto descriptor capability validation failed: 0x%08" PRIx32,
+            descriptor_err);
+        return descriptor_err;
+    }
 
     actrust_crypto_ctx_t new_ctx = ACTRUST_CALLOC(1, sizeof(*new_ctx));
     if (new_ctx == NULL) {
@@ -321,6 +386,29 @@ actrust_err_t actrust_crypto_key_generate(actrust_crypto_ctx_t  ctx,
     }
     (*out_key)->ops = ops;
     return ACTRUST_OK;
+}
+
+actrust_err_t actrust_crypto_key_migrate(actrust_crypto_ctx_t ctx,
+                                         uint32_t source_id, uint32_t target_id)
+{
+    if (ctx == NULL || source_id == target_id) {
+        return CRYPTO_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    const actrust_crypto_key_desc_t *source =
+        actrust_crypto_key_lookup(source_id);
+    const actrust_crypto_key_desc_t *target =
+        actrust_crypto_key_lookup(target_id);
+    if (source == NULL || target == NULL || source->type != target->type ||
+        source->backend != target->backend) {
+        return CRYPTO_ERR(ACTRUST_ERR_UNSUPPORTED);
+    }
+
+    const crypto_backend_ops_t *ops = actrust_crypto_get_ops(ctx, source);
+    if (ops->key_migrate == NULL) {
+        return CRYPTO_ERR(ACTRUST_ERR_UNSUPPORTED);
+    }
+    return ops->key_migrate(ctx, source_id, target_id);
 }
 
 actrust_err_t actrust_crypto_key_import(actrust_crypto_ctx_t    ctx,

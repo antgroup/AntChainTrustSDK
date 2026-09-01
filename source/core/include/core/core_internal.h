@@ -113,8 +113,8 @@ typedef struct {
     /* Security */
     actrust_crypto_ctx_t
         crypto; /**< Crypto subsystem context for key and signing operations. */
-    actrust_crypto_key_t sign_key; /**< Device signing key used for registration
-                                   and data publish. */
+    actrust_crypto_key_t sign_key; /**< Device/business signing key used for
+                                     registration and data publish. */
 
     /* Time synchronization */
     actrust_ntp_t

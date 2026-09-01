@@ -56,6 +56,7 @@ typedef enum {
 #define ACTRUST_CLOUD_CLAIM_CERT_ID   ACTRUST_CRYPTO_CERT_ID_X509_0
 #define ACTRUST_CLOUD_RUNTIME_KEY_ID  ACTRUST_CRYPTO_KEY_ID_EC_1
 #define ACTRUST_CLOUD_RUNTIME_CERT_ID ACTRUST_CRYPTO_CERT_ID_X509_1
+#define ACTRUST_CLOUD_SIGNING_KEY_ID  ACTRUST_CRYPTO_KEY_ID_EC_2
 
 /* ========================================================================
  * Message Types

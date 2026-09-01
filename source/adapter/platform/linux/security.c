@@ -55,6 +55,11 @@
 /** @brief Maximum length for any constructed path */
 #define SEC_PATH_MAX 256
 
+actrust_sec_capabilities_t actrust_sec_get_capabilities(void)
+{
+    return 0u;
+}
+
 /* ========================================================================
  * Private Helpers
  * ======================================================================== */
