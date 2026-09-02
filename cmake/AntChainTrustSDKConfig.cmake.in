@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+get_filename_component(
+    _ACTRUST_PACKAGE_PREFIX
+    "${CMAKE_CURRENT_LIST_DIR}/../../.."
+    ABSOLUTE
+)
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+foreach(_actrust_external_target IN ITEMS
+    MbedTLS::mbedcrypto
+    MbedTLS::mbedx509
+    MbedTLS::mbedtls
+    core_mqtt
+    core_mqtt_agent
+    backoff_algorithm
+    core_json
+    core_sntp
+)
+    if(NOT TARGET "${_actrust_external_target}")
+        message(FATAL_ERROR
+            "AntChainTrustSDK requires external target '${_actrust_external_target}'. "
+            "Provide the reusable third-party dependency before find_package()."
+        )
+    endif()
+endforeach()
+
+add_library(AntChainTrustSDK::core STATIC IMPORTED)
+set_target_properties(
+    AntChainTrustSDK::core
+    PROPERTIES
+        IMPORTED_LOCATION "${_ACTRUST_PACKAGE_PREFIX}/@CMAKE_INSTALL_LIBDIR@/libAntChainTrustSDK.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${_ACTRUST_PACKAGE_PREFIX}/@CMAKE_INSTALL_INCLUDEDIR@"
+        INTERFACE_LINK_LIBRARIES
+            "MbedTLS::mbedtls;MbedTLS::mbedx509;MbedTLS::mbedcrypto;core_mqtt_agent;core_mqtt;backoff_algorithm;core_json;core_sntp;Threads::Threads"
+)
+
+unset(_ACTRUST_PACKAGE_PREFIX)

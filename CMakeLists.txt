@@ -17,6 +17,9 @@ project(
     DESCRIPTION "IoT Framework for Embedded Systems"
 )
 
+include(CMakePackageConfigHelpers)
+include(GNUInstallDirs)
+
 # =============================================================================
 # Project Configuration
 # =============================================================================
@@ -75,6 +78,18 @@ include("${ACTRUST_CONFIG_CMAKE}")
 add_subdirectory(source)
 
 # Add third-party dependencies
+set(DISABLE_PACKAGE_CONFIG_AND_INSTALL
+    ON
+    CACHE BOOL
+    "Do not install third-party package metadata with the SDK"
+    FORCE
+)
+set(INSTALL_MBEDTLS_HEADERS
+    OFF
+    CACHE BOOL
+    "Do not install third-party headers with the SDK"
+    FORCE
+)
 add_subdirectory(3rdparts)
 
 # Optional usage examples (off by default; require the host/Linux build)
@@ -87,3 +102,114 @@ endif()
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
+
+# =============================================================================
+# SDK Installation and Package Export
+# =============================================================================
+
+set(ACTRUST_SDK_ARCHIVE "${CMAKE_BINARY_DIR}/lib/libAntChainTrustSDK.a")
+if(CONFIG_ACTRUST_ADAPTER_PLATFORM_LINUX)
+    set(ACTRUST_ADAPTER_ARCHIVE
+        "${CMAKE_BINARY_DIR}/source/adapter/platform/linux/libadapter.a"
+    )
+elseif(CONFIG_ACTRUST_ADAPTER_PLATFORM_ANDROID)
+    set(ACTRUST_ADAPTER_ARCHIVE
+        "${CMAKE_BINARY_DIR}/source/adapter/platform/android/libadapter.a"
+    )
+elseif(CONFIG_ACTRUST_ADAPTER_PLATFORM_SIMCOM_A7606E)
+    set(ACTRUST_ADAPTER_ARCHIVE
+        "${CMAKE_BINARY_DIR}/source/adapter/platform/simcom/a7606e/libadapter.a"
+    )
+else()
+    message(FATAL_ERROR "No supported adapter platform is configured")
+endif()
+
+set(ACTRUST_SDK_ARCHIVES
+    "${CMAKE_BINARY_DIR}/source/libactrust_common.a"
+    "${ACTRUST_ADAPTER_ARCHIVE}"
+    "${CMAKE_BINARY_DIR}/source/components/log/liblog.a"
+    "${CMAKE_BINARY_DIR}/source/components/json/libjson.a"
+    "${CMAKE_BINARY_DIR}/source/components/kv/libkv.a"
+    "${CMAKE_BINARY_DIR}/source/components/ntp/libntp.a"
+    "${CMAKE_BINARY_DIR}/source/components/queue/libqueue.a"
+    "${CMAKE_BINARY_DIR}/source/components/crypto/libcrypto.a"
+    "${CMAKE_BINARY_DIR}/source/components/tls/libtls.a"
+    "${CMAKE_BINARY_DIR}/source/components/mqtt/libmqtt.a"
+    "${CMAKE_BINARY_DIR}/source/components/cloud/libcloud.a"
+    "${CMAKE_BINARY_DIR}/source/core/libcore.a"
+)
+set(ACTRUST_SDK_TARGETS
+    actrust_common
+    adapter
+    log
+    json
+    kv
+    ntp
+    queue
+    crypto
+    tls
+    mqtt
+    cloud
+    core
+)
+
+list(LENGTH ACTRUST_SDK_ARCHIVES ACTRUST_ARCHIVE_COUNT)
+set(ACTRUST_ARCHIVE_ARGS)
+math(EXPR ACTRUST_ARCHIVE_LAST "${ACTRUST_ARCHIVE_COUNT} - 1")
+foreach(index RANGE ${ACTRUST_ARCHIVE_LAST})
+    list(GET ACTRUST_SDK_ARCHIVES ${index} archive)
+    list(APPEND ACTRUST_ARCHIVE_ARGS "-DACTRUST_ARCHIVE_${index}=${archive}")
+endforeach()
+
+add_custom_command(
+    OUTPUT "${ACTRUST_SDK_ARCHIVE}"
+    COMMAND
+        "${CMAKE_COMMAND}" "-DACTRUST_ARCHIVE_OUTPUT=${ACTRUST_SDK_ARCHIVE}"
+        "-DACTRUST_ARCHIVE_AR=${CMAKE_AR}"
+        "-DACTRUST_ARCHIVE_RANLIB=${CMAKE_RANLIB}"
+        "-DACTRUST_ARCHIVE_COUNT=${ACTRUST_ARCHIVE_COUNT}"
+        ${ACTRUST_ARCHIVE_ARGS} -P
+        "${CMAKE_CURRENT_LIST_DIR}/cmake/merge_static_libraries.cmake"
+    DEPENDS ${ACTRUST_SDK_TARGETS}
+    VERBATIM
+)
+add_custom_target(AntChainTrustSDK ALL DEPENDS "${ACTRUST_SDK_ARCHIVE}")
+
+install(
+    FILES
+        "${CMAKE_CURRENT_LIST_DIR}/include/actrust.h"
+        "${CMAKE_CURRENT_LIST_DIR}/include/actrust_errno.h"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+)
+
+install(
+    CODE
+        "execute_process(
+        COMMAND \"${CMAKE_COMMAND}\" --build \"${CMAKE_BINARY_DIR}\"
+            --target AntChainTrustSDK
+        RESULT_VARIABLE actrust_install_build_result
+    )
+    if(NOT actrust_install_build_result EQUAL 0)
+        message(FATAL_ERROR \"Failed to build AntChainTrustSDK archive before install\")
+    endif()"
+)
+
+install(FILES "${ACTRUST_SDK_ARCHIVE}" DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+
+configure_file(
+    "${CMAKE_CURRENT_LIST_DIR}/cmake/AntChainTrustSDKConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/AntChainTrustSDKConfig.cmake"
+    @ONLY
+)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/AntChainTrustSDKConfigVersion.cmake"
+    COMPATIBILITY SameMajorVersion
+)
+
+install(
+    FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/AntChainTrustSDKConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/AntChainTrustSDKConfigVersion.cmake"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/AntChainTrustSDK"
+)

@@ -185,6 +185,21 @@ set_tests_properties(
     PROPERTIES LABELS "actrust;common;unit"
 )
 
+# -----------------------------------------------------------------------------
+# Installed package consumer
+# -----------------------------------------------------------------------------
+add_test(
+    NAME package_consumer_test
+    COMMAND
+        "${CMAKE_COMMAND}" "-DACTRUST_PACKAGE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+        "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" -P
+        "${CMAKE_CURRENT_LIST_DIR}/package/package_consumer_test.cmake"
+)
+set_tests_properties(
+    package_consumer_test
+    PROPERTIES LABELS "actrust;package;smoke"
+)
+
 add_subdirectory(adapter)
 add_subdirectory(components)
 add_subdirectory(core)

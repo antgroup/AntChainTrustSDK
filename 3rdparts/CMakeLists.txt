@@ -29,7 +29,7 @@ if(CONFIG_ACTRUST_3RDPARTS_BACKOFF_BACKOFFALGO)
         CMakeLists.txt
     )
     message(STATUS "AntChainTrustSDK: Including backoffAlgorithm library")
-    add_subdirectory(backoffAlgorithm)
+    add_subdirectory(backoffAlgorithm EXCLUDE_FROM_ALL)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -42,7 +42,7 @@ if(CONFIG_ACTRUST_3RDPARTS_JSON_COREJSON)
         CMakeLists.txt
     )
     message(STATUS "AntChainTrustSDK: Including coreJSON library")
-    add_subdirectory(coreJSON)
+    add_subdirectory(coreJSON EXCLUDE_FROM_ALL)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -54,8 +54,14 @@ if(CONFIG_ACTRUST_3RDPARTS_NTP_CORESNTP)
         "${CMAKE_CURRENT_LIST_DIR}/coreSNTP"
         CMakeLists.txt
     )
-    message(STATUS "AntChainTrustSDK: Including coreSNTP library")
-    add_subdirectory(coreSNTP)
+    if(NOT TARGET core_sntp)
+        include(${CMAKE_CURRENT_LIST_DIR}/coreSNTP/coreSntpFilePaths.cmake)
+        add_library(core_sntp STATIC ${CORE_SNTP_SOURCES})
+        target_include_directories(
+            core_sntp PUBLIC ${CORE_SNTP_INCLUDE_PUBLIC_DIRS}
+        )
+        target_compile_definitions(core_sntp PUBLIC SNTP_DO_NOT_USE_CUSTOM_CONFIG)
+    endif()
 endif()
 
 # -----------------------------------------------------------------------------
@@ -75,7 +81,11 @@ if(CONFIG_ACTRUST_3RDPARTS_CRYPTO_MBEDTLS)
     set(ENABLE_PROGRAMS
         OFF
         CACHE BOOL "Disable Mbed TLS programs")
-    add_subdirectory(mbedtls)
+    set(ACTRUST_SKIP_MBEDTLS_INSTALL_RULES "${CMAKE_SKIP_INSTALL_RULES}")
+    set(CMAKE_SKIP_INSTALL_RULES ON)
+    add_subdirectory(mbedtls EXCLUDE_FROM_ALL)
+    set(CMAKE_SKIP_INSTALL_RULES "${ACTRUST_SKIP_MBEDTLS_INSTALL_RULES}")
+    unset(ACTRUST_SKIP_MBEDTLS_INSTALL_RULES)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -129,8 +139,12 @@ if(BUILD_TESTING)
     actrust_require_submodule(
         "Unity"
         "${CMAKE_CURRENT_LIST_DIR}/Unity"
-        CMakeLists.txt
+        src/unity.c
     )
     message(STATUS "AntChainTrustSDK: Including Unity test framework")
-    add_subdirectory(Unity)
+    add_library(unity STATIC "${CMAKE_CURRENT_LIST_DIR}/Unity/src/unity.c")
+    target_include_directories(
+        unity
+        PUBLIC "${CMAKE_CURRENT_LIST_DIR}/Unity/src"
+    )
 endif()
