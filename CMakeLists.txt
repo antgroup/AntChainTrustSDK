@@ -213,3 +213,146 @@ install(
         "${CMAKE_CURRENT_BINARY_DIR}/AntChainTrustSDKConfigVersion.cmake"
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/AntChainTrustSDK"
 )
+
+# =============================================================================
+# SDK Bundle Metadata
+# =============================================================================
+
+set(ACTRUST_BUNDLE_METADATA_DIR "${CMAKE_BINARY_DIR}/bundle-metadata")
+set(ACTRUST_THIRD_PARTY_MANIFEST
+    "${ACTRUST_BUNDLE_METADATA_DIR}/THIRD_PARTY.json"
+)
+set(ACTRUST_SPDX_SBOM "${ACTRUST_BUNDLE_METADATA_DIR}/sbom.spdx.json")
+set(ACTRUST_BUNDLE_METADATA_SCRIPT
+    "${CMAKE_CURRENT_LIST_DIR}/cmake/generate_bundle_metadata.cmake"
+)
+
+add_custom_command(
+    OUTPUT "${ACTRUST_THIRD_PARTY_MANIFEST}" "${ACTRUST_SPDX_SBOM}"
+    COMMAND
+        "${CMAKE_COMMAND}" "-DACTRUST_SOURCE_DIR=${CMAKE_CURRENT_LIST_DIR}"
+        "-DACTRUST_OUTPUT_DIR=${ACTRUST_BUNDLE_METADATA_DIR}"
+        "-DACTRUST_SDK_VERSION=${PROJECT_VERSION}" -P
+        "${ACTRUST_BUNDLE_METADATA_SCRIPT}"
+    DEPENDS
+        "${ACTRUST_BUNDLE_METADATA_SCRIPT}"
+        "${CMAKE_CURRENT_LIST_DIR}/NOTICE"
+        "${CMAKE_CURRENT_LIST_DIR}/LICENSE"
+    VERBATIM
+)
+add_custom_target(
+    actrust_bundle_metadata
+    DEPENDS "${ACTRUST_THIRD_PARTY_MANIFEST}" "${ACTRUST_SPDX_SBOM}"
+)
+
+install(
+    CODE
+        "execute_process(
+        COMMAND \"${CMAKE_COMMAND}\" --build \"${CMAKE_BINARY_DIR}\"
+            --target actrust_bundle_metadata
+        RESULT_VARIABLE actrust_metadata_result
+    )
+    if(NOT actrust_metadata_result EQUAL 0)
+        message(FATAL_ERROR \"Failed to build SDK bundle metadata before install\")
+    endif()"
+)
+
+install(
+    FILES
+        "${CMAKE_CURRENT_LIST_DIR}/LICENSE"
+        "${CMAKE_CURRENT_LIST_DIR}/NOTICE"
+        "${ACTRUST_THIRD_PARTY_MANIFEST}"
+        "${ACTRUST_SPDX_SBOM}"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/AntChainTrustSDK"
+    COMPONENT sdk
+)
+
+install(
+    FILES "${CMAKE_CURRENT_LIST_DIR}/3rdparts/backoffAlgorithm/LICENSE"
+    RENAME "backoffAlgorithm-LICENSE"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/AntChainTrustSDK/licenses"
+    COMPONENT sdk
+)
+install(
+    FILES "${CMAKE_CURRENT_LIST_DIR}/3rdparts/coreJSON/LICENSE"
+    RENAME "coreJSON-LICENSE"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/AntChainTrustSDK/licenses"
+    COMPONENT sdk
+)
+install(
+    FILES "${CMAKE_CURRENT_LIST_DIR}/3rdparts/coreMQTT/LICENSE"
+    RENAME "coreMQTT-LICENSE"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/AntChainTrustSDK/licenses"
+    COMPONENT sdk
+)
+install(
+    FILES "${CMAKE_CURRENT_LIST_DIR}/3rdparts/coreMQTT-Agent/LICENSE"
+    RENAME "coreMQTT-Agent-LICENSE"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/AntChainTrustSDK/licenses"
+    COMPONENT sdk
+)
+install(
+    FILES "${CMAKE_CURRENT_LIST_DIR}/3rdparts/coreSNTP/LICENSE"
+    RENAME "coreSNTP-LICENSE"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/AntChainTrustSDK/licenses"
+    COMPONENT sdk
+)
+install(
+    FILES "${CMAKE_CURRENT_LIST_DIR}/3rdparts/mbedtls/LICENSE"
+    RENAME "mbedTLS-LICENSE"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/AntChainTrustSDK/licenses"
+    COMPONENT sdk
+)
+
+set(ACTRUST_BUNDLE_ARCHIVE
+    "${CMAKE_BINARY_DIR}/AntChainTrustSDK-${PROJECT_VERSION}-${ACTRUST_BUILD_PLATFORM}.tar.gz"
+)
+set(ACTRUST_BUNDLE_CHECKSUM "${ACTRUST_BUNDLE_ARCHIVE}.sha256")
+
+set(ACTRUST_BUNDLE_CHECKSUM_SCRIPT
+    "${CMAKE_CURRENT_LIST_DIR}/cmake/generate_bundle_checksum.cmake"
+)
+
+set(CPACK_PACKAGE_NAME "AntChainTrustSDK")
+set(CPACK_PACKAGE_VENDOR "Antchain (SHANGHAI) Digital Technology Co., Ltd.")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "AntChainTrustSDK development bundle")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_FILE_NAME
+    "AntChainTrustSDK-${PROJECT_VERSION}-${ACTRUST_BUILD_PLATFORM}"
+)
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "AntChainTrustSDK")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_LIST_DIR}/LICENSE")
+set(CPACK_GENERATOR "TGZ")
+set(CPACK_SOURCE_GENERATOR "")
+set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY TRUE)
+set(CPACK_ARCHIVE_COMPONENT_INSTALL OFF)
+set(CPACK_VERBATIM_VARIABLES YES)
+
+include(CPack)
+
+add_custom_target(
+    actrust_sdk_bundle
+    COMMAND
+        "${CMAKE_CPACK_COMMAND}" --config
+        "${CMAKE_BINARY_DIR}/CPackConfig.cmake"
+    COMMAND
+        "${CMAKE_COMMAND}" "-DACTRUST_BUNDLE_ARCHIVE=${ACTRUST_BUNDLE_ARCHIVE}"
+        "-DACTRUST_BUNDLE_CHECKSUM=${ACTRUST_BUNDLE_CHECKSUM}" -P
+        "${ACTRUST_BUNDLE_CHECKSUM_SCRIPT}"
+    DEPENDS actrust_bundle_metadata AntChainTrustSDK
+    USES_TERMINAL
+)
+
+if(BUILD_TESTING)
+    add_test(
+        NAME package_bundle_test
+        COMMAND
+            "${CMAKE_COMMAND}" "-DACTRUST_PACKAGE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+            "-P"
+            "${CMAKE_CURRENT_LIST_DIR}/tests/package/package_bundle_test.cmake"
+    )
+    set_tests_properties(
+        package_bundle_test
+        PROPERTIES LABELS "actrust;package;unit"
+    )
+endif()
