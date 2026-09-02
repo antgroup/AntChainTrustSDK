@@ -5,11 +5,20 @@
 A modular IoT framework in **C99** providing platform abstraction, component
 libraries, and third-party integrations for embedded systems.
 
-AntChainTrustSDK is designed as a lightweight, multi-cloud compatible trusted on-chain
-SDK for resource-constrained embedded devices. It acts as a trusted anchor
-between physical devices and blockchain networks, helping IoT data remain
-tamper-evident at the source, attributable to its originating device, and ready
-for secure submission to cloud and blockchain-backed workflows.
+AntChainTrustSDK is a lightweight C99 IoT SDK designed for resource-constrained
+embedded devices and a multi-cloud, blockchain-connected product direction. The
+current repository implements an AWS IoT Core integration that helps
+applications collect, sign, and queue device data for cloud workflows. More
+cloud providers, direct blockchain integration, and on-chain transaction
+submission are planned extension capabilities rather than features implemented
+in this repository today.
+
+The current AWS path combines Fleet Provisioning for runtime credentials with
+an SDK-specific challenge-response registration flow. It publishes signed
+business data as AWS IoT Shadow updates; a successful enqueue does not mean
+that AWS, a downstream service, or a blockchain network has acknowledged it.
+The lower-level MQTT component currently borrows connection configuration
+buffers, so callers must observe its documented lifetime requirements.
 
 AntChainTrustSDK supports generic Linux (`linux_x86` and `linux_arm`), Android
 NDK builds, and SIMCom A7606E-H (ARM Cortex-A7, OpenWrt + musl libc), and is
@@ -20,9 +29,12 @@ effort.
 
 ## Highlights
 
-- **Single-binary cloud client** -- registration, MQTT, TLS, and downlink dispatch
-  exposed behind a tiny async API (`actrust_init`, `actrust_connect`, `actrust_register`,
-  `actrust_data_publish`).
+- **Multi-cloud-ready architecture** -- the current implementation provides an
+  AWS IoT Core client, including Fleet Provisioning, MQTT/TLS, SDK registration
+  challenge-response, and internal registration message dispatch. Additional
+  providers and blockchain-facing integrations are planned extensions. The
+  public Core API exposes asynchronous init, connect, register, publish,
+  disconnect, and deinit operations.
 - **Clean platform abstraction** -- `network`, `storage`, `security`, `system`,
   `device` interfaces let you port to a new SoC by implementing five headers.
 - **Composable components** -- `cloud`, `mqtt`, `tls`, `crypto`, `kv`, `log`,
@@ -109,6 +121,10 @@ kconfig-mconf Kconfig                # opens the ncurses menu
 ./build.sh --skip-config
 ```
 
+`--skip-config` requires an existing `.config` and generated configuration for
+the selected build. It does not validate or repair a missing, stale, or
+incompatible configuration; use a platform argument when switching targets.
+
 ---
 
 ## Cross-Compilation (SIMCom A7606E-H)
@@ -124,17 +140,16 @@ export ACTRUST_TOOLCHAIN_PATH=/path/to/arm-openwrt-linux
 The default toolchain file is `cmake/toolchain-simcom-a7606e.cmake`. Set
 `ACTRUST_TOOLCHAIN_PATH` to point at the unpacked OpenWrt toolchain root (the
 directory that contains `bin/arm-openwrt-linux-muslgnueabi-gcc`). The configure
-step also requires the target sysroot and the vendor libraries `sdk`, `log`,
-`uci`, `sunseasdk`, `teec`, and `crypto`; missing dependencies are reported
-before compilation.
+step also requires the target sysroot and vendor libraries; missing dependencies
+are reported before compilation.
 
 The SIMCom security adapter uses Sunsea TEE secure-data storage. Its random
 service uses the Linux kernel `getrandom(2)` software CSPRNG, not a TEE/TRNG,
-and therefore the SIMCom profile does not advertise hardware random, secure key
+and the current profile does not provide non-exportable hardware key
 management, ECDSA, hash, or AES capabilities. Those key and crypto adapter APIs
 return `ACTRUST_ERR_UNSUPPORTED`; the development crypto profile uses software
-backends. A strict production hardware-key profile is unavailable until a
-vendor-supported non-exportable ECDSA/key-management interface is provided.
+backends. A strict production hardware-key profile requires a vendor-supported
+non-exportable ECDSA/key-management interface.
 
 ---
 
@@ -151,10 +166,21 @@ export ANDROID_NDK_HOME=/path/to/android-ndk
 The build defaults to `ANDROID_ABI=arm64-v8a` and
 `ANDROID_PLATFORM=android-23`. Override those environment variables when a
 different ABI or API level is required. The Android adapter stores development
-data under `/data/local/tmp/actrust/storage` and security slots under
-`/data/local/tmp/actrust/security` by default.
+data under `/data/local/tmp/actrust/storage` and
+`/data/local/tmp/actrust/security` by default. The file-backed security
+adapter is not a hardware confidentiality, anti-tamper, anti-rollback, or
+non-exportable-key boundary. Android NDK/device compilation and runtime
+validation require the corresponding external toolchain and device environment.
 
 ---
+
+## Capability and validation levels
+
+A successful host build proves compilation for that host configuration only.
+It does not prove Linux ARM, Android, SIMCom device execution, production
+hardware-key support, or AWS integration. The repository currently has no
+installed/exported CMake package or ABI/API compatibility guarantee; consumers
+should build against the exact source revision they validate.
 
 ## Adding a New Platform
 
@@ -191,10 +217,20 @@ software private-key slots production-safe.
 
 ## API Sketch
 
-Register an async completion callback with `actrust_set_callback()`. The
-callback receives the operation result and the current Core state; application
-code should use that event to decide the next SDK call from its own main loop or
-task context.
+Register an async completion callback with `actrust_set_callback()`. Core invokes
+it synchronously on the Core service task after an accepted job finishes. Only
+successfully queued operations produce callbacks; invalid arguments, invalid
+state, queue-full, and allocation failures are returned synchronously. The
+callback must not call `actrust_deinit()`; record the result and make the next
+SDK call from the application's own main loop or task after the callback
+returns. Callback user data must remain valid until delivery is complete.
+
+`actrust_data_publish()` accepts non-empty business bytes without embedded NUL
+characters. Core adds the timestamp and signature, then the AWS provider wraps
+the generated business envelope as an IoT Shadow `state.reported` update.
+`ACTRUST_OK` means the asynchronous work was accepted locally; it does not
+confirm remote delivery. The lower-level `actrust_cloud_send_data()` API has a
+stricter input contract: its payload must be a complete JSON object.
 
 A complete, runnable version of this flow lives in
 [`examples/hello_actrust.c`](examples/hello_actrust.c). Build it with:

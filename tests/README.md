@@ -1,16 +1,18 @@
 # AntChainTrustSDK Tests
 
 Tests for every AntChainTrustSDK layer — adapter, core, and components. The directory
-mirrors `source/` so a test for `<foo>` lives next to where one would expect
-to find it.
+mirrors `source/` so a test for `<foo>` lives next to where one would expect to
+find it.
 
 Each component (and each adapter interface) has up to two executables:
 
 - `<name>_smoke_test` — integration-flavoured: real network, real PKI, real
-  long-running tasks. Labelled `smoke`. Some require external state and are
-  skipped if PKI material is absent (see below).
+  long-running tasks, or protocol-level behavior. Labelled `smoke`; these tests
+  are not part of the deterministic offline baseline and may be skipped when a
+  documented prerequisite is absent.
 - `<name>_unit_test` — fast, isolated checks of argument validation, error
-  paths, and edge cases. Labelled `unit`. Always runnable on the host.
+  paths, and edge cases. Labelled `unit`; these are intended to run offline on
+  the host.
 
 Both kinds use the [Unity](https://github.com/ThrowTheSwitch/Unity) test
 framework (vendored at `3rdparts/Unity`).
@@ -62,6 +64,21 @@ Run a single test by name (after a build):
 
 ```sh
 ctest --test-dir build --output-on-failure -R queue_unit_test
+```
+
+Run by CTest label:
+
+| Label       | What it matches                                  |
+| ----------- | ------------------------------------------------ |
+| `actrust`   | Every AntChainTrustSDK test.                     |
+| `adapter`   | `tests/adapter/*` — platform abstraction.        |
+| `component` | `tests/components/*` — protocol/utility libs.    |
+| `core`      | `tests/core/*` — public-API lifecycle.           |
+| `smoke`     | All `*_smoke_test` executables.                  |
+| `unit`      | All `*_unit_test` executables.                   |
+
+```sh
+ctest --test-dir build --output-on-failure --label-regex unit
 ```
 
 ## CTest label taxonomy
@@ -127,58 +144,32 @@ selections are optional jobs for environments that provide their prerequisites.
 AWS tests without credentials remain selected but use the existing configure-time
 CTest skip behavior.
 
-## CI quality gates
-
-The Linux quality workflow uses the same labels instead of maintaining a list of
-test executable names:
-
-- Debug and Release jobs build all tests, then run `unit` and the `actrust`
-  selection excluding `network|integration`.
-- The ASan/UBSan job runs the `unit` selection on an instrumented Debug build.
-  Host smoke tests are kept in the regular Debug/Release jobs until their task
-  lifecycles are sanitizer-clean; this boundary is reported explicitly rather
-  than disabling leak detection.
-- `network` tests are not run unless a controlled network environment is
-  provided.
-- `aws`/`integration` tests are not run unless an explicit CI credential and PKI
-  contract is provided. Missing AWS secrets do not block the baseline workflow.
-- TSan remains `NOT RUN` until deterministic concurrency coverage is available;
-  ASan/UBSan results must not be presented as TSan coverage.
-
-The workflow summary reports these conditional groups as `NOT RUN`. A test that
-is selected but detects a missing runtime prerequisite may instead report
-`SKIP`; see the result-state definitions below.
-
-## Test result states
-
-`PASS` means the test completed successfully; `FAIL` means an assertion or
-unexpected error occurred; `SKIP` means a documented prerequisite was absent or
-an external resource was unavailable; `NOT RUN` means the requested test was
-not selected or was not built. A Unity `TEST_IGNORE_MESSAGE` is reported within
-its executable, while configure-time CTest skips use `SKIP_REGULAR_EXPRESSION`.
-
-
 ## PKI-gated tests
 
 Four smoke tests (`core_smoke_test`, `cloud_smoke_test`, `mqtt_smoke_test`,
-`tls_smoke_test`) need real AWS IoT credentials and AWS config. They are
-registered as **skipped** when expected `client.*` files or required
-`CONFIG_ACTRUST_CLOUD_AWS_*` values are absent. They still build; they just exit
-immediately with a `Skipped` message. See [`pki/PKI.md`](pki/PKI.md) for what
-each test wants and how to obtain it.
+`tls_smoke_test`) need real AWS IoT credentials, endpoint configuration, and
+PKI material. They are registered as **skipped** when expected `client.*` files
+or required `CONFIG_ACTRUST_CLOUD_AWS_*` values are absent. They still build;
+they just exit immediately with a `Skipped` message. See [`pki/PKI.md`](pki/PKI.md)
+for what each test wants and how to obtain it.
+
+These tests exercise a real AWS/PKI integration path; they are not equivalent to
+host unit coverage. Android and SIMCom builds, target-device execution, and
+production hardware-key validation require separate toolchains or devices and
+are not covered by the default Linux test command.
 
 Sensitive material (`client.*`, `*.crt*`, `*.der*`, `*.key*`, `*.csr*`) is blocked by
 `.gitignore` — do not bypass these rules.
 
 ## Runtime State Isolation
 
-CTest runs each AntChainTrustSDK test from its own directory under `build/tests/runtime/`.
-For Linux test builds, configure storage as relative paths such as
-`.actrust/storage` and `.actrust/security`; those paths resolve under the per-test
-runtime directory, not under the developer's home directory. A clean build
-removes the runtime tree with the rest of `build/`; when rerunning CTest without
-`--clean-build`, remove `build/tests/runtime/` manually if a fresh runtime state
-is required.
+CTest runs each AntChainTrustSDK test from its own directory under
+`build/tests/runtime/`. For Linux test builds, configure storage as relative
+paths such as `.actrust/storage` and `.actrust/security`; those paths resolve
+under the per-test runtime directory, not under the developer's home directory.
+A clean build removes the runtime tree with the rest of `build/`; when rerunning
+CTest without `--clean-build`, remove `build/tests/runtime/` manually if a fresh
+runtime state is required.
 
 ## Shared scaffolding
 

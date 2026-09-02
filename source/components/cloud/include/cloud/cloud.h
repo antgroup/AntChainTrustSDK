@@ -37,7 +37,12 @@ typedef struct actrust_cloud_ctx *actrust_cloud_t;
  * Enumerations
  * ======================================================================== */
 
-/** @brief Cloud provider identifier. */
+/**
+ * @brief Cloud provider identifier.
+ *
+ * AWS IoT Core is the only provider implemented by this SDK today. Additional
+ * providers remain an extension point and are not implied by this enum.
+ */
 typedef enum {
     ACTRUST_CLOUD_PROVIDER_AWS = 1, /**< AWS IoT Core provider. */
 } actrust_cloud_provider_t;
@@ -64,6 +69,10 @@ typedef enum {
 
 /**
  * @brief Cloud downlink message.
+ *
+ * The current AWS provider places internal registration messages in this queue.
+ * The payload is owned by the queue message and is valid until that message is
+ * removed by the consumer.
  */
 typedef struct {
     uint8_t
@@ -133,6 +142,11 @@ actrust_err_t actrust_cloud_disconnect(actrust_cloud_t cloud);
 /**
  * @brief Send business uplink data.
  *
+ * The current AWS implementation requires @p payload to be a complete JSON
+ * object encoded as non-NUL bytes. It wraps that object in an AWS IoT Shadow
+ * @c state.reported update and submits it through MQTT at QoS 0. A successful
+ * return means the update was accepted by the local MQTT transmit queue, not
+ * that AWS, a business service, or a blockchain endpoint acknowledged it.
  * @param[in] cloud Cloud handle.
  * @param[in] payload Business payload.
  * @param[in] payload_len Payload length.
@@ -151,6 +165,11 @@ actrust_err_t actrust_cloud_send_data(actrust_cloud_t cloud,
 
 /**
  * @brief Send a registration uplink message.
+ *
+ * Registration traffic is the SDK's provider-specific challenge-response
+ * protocol and is separate from AWS Fleet Provisioning, which establishes the
+ * runtime identity. The payload is borrowed for the duration of this call; the
+ * MQTT layer copies it into its asynchronous command before returning.
  *
  * Registration traffic uses provider-specific register topics and does not use
  * the business data path.
