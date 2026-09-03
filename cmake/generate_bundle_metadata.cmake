@@ -1,6 +1,34 @@
 # SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
+set(_actrust_dependencies
+    "backoffAlgorithm|backoffAlgorithm|v1.4.2|14f4c88b33dd554be30a00a312c88d3986d457d0|MIT|https://github.com/FreeRTOS/backoffAlgorithm"
+    "coreJSON|coreJSON|v3.3.1|cffa492da18c890181d64462f8af63992a69d3b0|MIT|https://github.com/FreeRTOS/coreJSON"
+    "coreMQTT|coreMQTT|v2.3.1|2beef04725328923e05e576b884212d53ec97af7|MIT|https://github.com/FreeRTOS/coreMQTT"
+    "coreMQTT-Agent|coreMQTT-Agent|v1.3.1|e977d70ee68c95f94d967ea18feadfffe5c7a584|MIT|https://github.com/FreeRTOS/coreMQTT-Agent"
+    "coreSNTP|coreSNTP|v2.0.0|50f5f96f4c33b14c0358f404ff4ff2a29d422ad7|MIT|https://github.com/FreeRTOS/coreSNTP"
+    "mbedTLS|mbedtls|v3.6.5|e185d7fd85499c8ce5ca2a54f5cf8fe7dbe3f8df|Apache-2.0|https://github.com/Mbed-TLS/mbedtls"
+)
+foreach(_actrust_dependency IN LISTS _actrust_dependencies)
+    string(REPLACE "|" ";" _actrust_fields "${_actrust_dependency}")
+    list(GET _actrust_fields 0 _actrust_name)
+    list(GET _actrust_fields 1 _actrust_directory)
+    list(GET _actrust_fields 3 _actrust_expected_sha)
+    set(_actrust_path "${ACTRUST_SOURCE_DIR}/3rdparts/${_actrust_directory}")
+    if(NOT EXISTS "${_actrust_path}/.git")
+        message(FATAL_ERROR "Dependency checkout missing: ${_actrust_path}")
+    endif()
+    execute_process(
+        COMMAND git -C "${_actrust_path}" rev-parse HEAD
+        OUTPUT_VARIABLE _actrust_actual_sha
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _actrust_git_result
+    )
+    if(NOT _actrust_git_result EQUAL 0 OR NOT _actrust_actual_sha STREQUAL _actrust_expected_sha)
+        message(FATAL_ERROR "Dependency SHA mismatch for ${_actrust_name}")
+    endif()
+endforeach()
+
 string(
     CONCAT _actrust_manifest
     "{\n"

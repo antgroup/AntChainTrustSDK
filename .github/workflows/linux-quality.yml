@@ -38,7 +38,7 @@ jobs:
       - name: Build API documentation
         run: |
           doxygen Doxyfile
-          test -f docs/html/index.html
+          test -f docs/v1.1.0/html/index.html
 
       - name: Record conditional test status
         run: |

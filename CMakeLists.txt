@@ -10,9 +10,14 @@
 
 cmake_minimum_required(VERSION 3.16)
 
+file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/VERSION" ACTRUST_VERSION LIMIT_COUNT 1)
+if(NOT ACTRUST_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "VERSION must contain a semantic version")
+endif()
+
 project(
     AntChainTrustSDK
-    VERSION 1.0.0
+    VERSION ${ACTRUST_VERSION}
     LANGUAGES C
     DESCRIPTION "IoT Framework for Embedded Systems"
 )
@@ -227,22 +232,29 @@ set(ACTRUST_BUNDLE_METADATA_SCRIPT
     "${CMAKE_CURRENT_LIST_DIR}/cmake/generate_bundle_metadata.cmake"
 )
 
-add_custom_command(
-    OUTPUT "${ACTRUST_THIRD_PARTY_MANIFEST}" "${ACTRUST_SPDX_SBOM}"
+add_custom_target(
+    actrust_bundle_metadata
     COMMAND
         "${CMAKE_COMMAND}" "-DACTRUST_SOURCE_DIR=${CMAKE_CURRENT_LIST_DIR}"
         "-DACTRUST_OUTPUT_DIR=${ACTRUST_BUNDLE_METADATA_DIR}"
         "-DACTRUST_SDK_VERSION=${PROJECT_VERSION}" -P
         "${ACTRUST_BUNDLE_METADATA_SCRIPT}"
+    BYPRODUCTS
+        "${ACTRUST_THIRD_PARTY_MANIFEST}"
+        "${ACTRUST_SPDX_SBOM}"
     DEPENDS
         "${ACTRUST_BUNDLE_METADATA_SCRIPT}"
         "${CMAKE_CURRENT_LIST_DIR}/NOTICE"
         "${CMAKE_CURRENT_LIST_DIR}/LICENSE"
+        "${CMAKE_CURRENT_LIST_DIR}/VERSION"
+        "${CMAKE_CURRENT_LIST_DIR}/.gitmodules"
+        "${CMAKE_CURRENT_LIST_DIR}/3rdparts/backoffAlgorithm"
+        "${CMAKE_CURRENT_LIST_DIR}/3rdparts/coreJSON"
+        "${CMAKE_CURRENT_LIST_DIR}/3rdparts/coreMQTT"
+        "${CMAKE_CURRENT_LIST_DIR}/3rdparts/coreMQTT-Agent"
+        "${CMAKE_CURRENT_LIST_DIR}/3rdparts/coreSNTP"
+        "${CMAKE_CURRENT_LIST_DIR}/3rdparts/mbedtls"
     VERBATIM
-)
-add_custom_target(
-    actrust_bundle_metadata
-    DEPENDS "${ACTRUST_THIRD_PARTY_MANIFEST}" "${ACTRUST_SPDX_SBOM}"
 )
 
 install(

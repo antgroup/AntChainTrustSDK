@@ -9,8 +9,13 @@ if(
 endif()
 
 set(_actrust_prefix "${ACTRUST_PACKAGE_BUILD_DIR}/bundle-install")
+file(
+    STRINGS "${CMAKE_CURRENT_LIST_DIR}/../../VERSION"
+    _actrust_version
+    LIMIT_COUNT 1
+)
 set(_actrust_archive
-    "${ACTRUST_PACKAGE_BUILD_DIR}/AntChainTrustSDK-1.0.0-linux_x86.tar.gz"
+    "${ACTRUST_PACKAGE_BUILD_DIR}/AntChainTrustSDK-${_actrust_version}-linux_x86.tar.gz"
 )
 set(_actrust_checksum "${_actrust_archive}.sha256")
 file(REMOVE_RECURSE "${_actrust_prefix}")

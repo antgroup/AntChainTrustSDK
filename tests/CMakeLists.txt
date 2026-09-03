@@ -168,6 +168,18 @@ set_tests_properties(
 )
 
 # -----------------------------------------------------------------------------
+# Release metadata and compatibility checks
+# -----------------------------------------------------------------------------
+add_test(
+    NAME release_check_test
+    COMMAND bash "${CMAKE_CURRENT_LIST_DIR}/release_check_test.sh"
+)
+set_tests_properties(
+    release_check_test
+    PROPERTIES LABELS "actrust;release;unit"
+)
+
+# -----------------------------------------------------------------------------
 # Shared test helper unit test
 # -----------------------------------------------------------------------------
 add_executable(

@@ -252,7 +252,7 @@ API docs are generated with Doxygen from the public headers, component
 interfaces, selected internal headers, and examples:
 
 ```bash
-doxygen Doxyfile        # output written to docs/html/ (git-ignored)
+doxygen Doxyfile        # output written to docs/v1.1.0/html/ (git-ignored)
 ```
 
 ---
