@@ -27,7 +27,15 @@ JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 # Platform defconfig directory
 CONFIGS_DIR="$ROOT_DIR/config"
 CONFIG_FILE="$ROOT_DIR/.config"
+CONFIG_OUTPUT_DIR="$BUILD_DIR/config"
+CONFIG_HEADER="$CONFIG_OUTPUT_DIR/actrust_config.h"
+CONFIG_CMAKE="$CONFIG_OUTPUT_DIR/actrust_config.cmake"
 SUPPORTED_PLATFORMS=(android linux_x86 linux_arm simcom_a7606e)
+PLATFORM_SYMBOLS=(
+    CONFIG_ACTRUST_ADAPTER_PLATFORM_LINUX
+    CONFIG_ACTRUST_ADAPTER_PLATFORM_ANDROID
+    CONFIG_ACTRUST_ADAPTER_PLATFORM_SIMCOM_A7606E
+)
 
 # Flags
 BUILD_TESTS=0
@@ -103,6 +111,155 @@ platform_defconfig_name() {
         return 1
         ;;
     esac
+}
+
+platform_config_symbol() {
+    case "$1" in
+    linux_x86 | linux_arm)
+        echo "CONFIG_ACTRUST_ADAPTER_PLATFORM_LINUX"
+        ;;
+    android)
+        echo "CONFIG_ACTRUST_ADAPTER_PLATFORM_ANDROID"
+        ;;
+    simcom_a7606e)
+        echo "CONFIG_ACTRUST_ADAPTER_PLATFORM_SIMCOM_A7606E"
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+config_cmake_enabled() {
+    local key="$1"
+    [[ -f $CONFIG_CMAKE ]] && grep -Eq "^set\\(${key}[[:space:]]+ON\\)[[:space:]]*$" "$CONFIG_CMAKE"
+}
+
+config_enabled_platform_count() {
+    local count=0
+    local symbol
+
+    for symbol in "${PLATFORM_SYMBOLS[@]}"; do
+        if config_enabled "$symbol"; then
+            count=$((count + 1))
+        fi
+    done
+
+    echo "$count"
+}
+
+config_cmake_enabled_platform_count() {
+    local count=0
+    local symbol
+
+    for symbol in "${PLATFORM_SYMBOLS[@]}"; do
+        if config_cmake_enabled "$symbol"; then
+            count=$((count + 1))
+        fi
+    done
+
+    echo "$count"
+}
+
+validate_config_files() {
+    if [[ ! -f $CONFIG_FILE ]]; then
+        log_error "Configuration file not found: $CONFIG_FILE"
+        log_error "Run ./build.sh <platform> to create it from a defconfig."
+        return 1
+    fi
+
+    local missing=0
+    local generated_file
+    for generated_file in "$CONFIG_HEADER" "$CONFIG_CMAKE"; do
+        if [[ ! -f $generated_file ]]; then
+            log_error "Generated configuration file not found: $generated_file"
+            missing=1
+        fi
+    done
+
+    if [[ $missing -ne 0 ]]; then
+        log_error "Run ./build.sh${PLATFORM:+ $PLATFORM} without --skip-config to regenerate configuration."
+        return 1
+    fi
+}
+
+validate_platform_config() {
+    local platform="$1"
+    local expected_symbol
+    expected_symbol="$(platform_config_symbol "$platform")"
+
+    if [[ $(config_enabled_platform_count) -ne 1 ]] ||
+        ! config_enabled "$expected_symbol" ||
+        [[ $(config_cmake_enabled_platform_count) -ne 1 ]] ||
+        ! config_cmake_enabled "$expected_symbol"; then
+        log_error "Configuration platform mismatch for '$platform'"
+        log_error "Expected only $expected_symbol=y in $CONFIG_FILE"
+        log_error "Expected only set($expected_symbol ON) in $CONFIG_CMAKE"
+        return 1
+    fi
+}
+
+validate_platform_cache() {
+    local platform="$1"
+    local cache_file="$BUILD_DIR/CMakeCache.txt"
+    local cached_platform=""
+
+    if [[ ! -f $cache_file ]]; then
+        return 0
+    fi
+
+    cached_platform="$(sed -n 's/^ACTRUST_BUILD_PLATFORM:STRING=//p' "$cache_file")"
+    if [[ -z $cached_platform ]]; then
+        if [[ $SKIP_CONFIG -eq 1 ]]; then
+            log_error "Existing CMake cache has no AntChainTrustSDK platform marker: $cache_file"
+            log_error "Remove $BUILD_DIR and rerun without --skip-config."
+            return 1
+        fi
+        log_warn "Existing CMake cache has no AntChainTrustSDK platform marker; resetting $BUILD_DIR"
+        rm -rf "$BUILD_DIR"
+        return 0
+    fi
+
+    if [[ $cached_platform != "$platform" ]]; then
+        if [[ $SKIP_CONFIG -eq 1 ]]; then
+            log_error "Build directory $BUILD_DIR is configured for '$cached_platform', not '$platform'"
+            log_error "Remove the build directory or rerun without --skip-config."
+            return 1
+        fi
+        log_warn "Platform changed from '$cached_platform' to '$platform'; resetting $BUILD_DIR"
+        rm -rf "$BUILD_DIR"
+    fi
+}
+
+config_platform_from_file() {
+    local symbol
+    local platform
+
+    if [[ $(config_enabled_platform_count) -ne 1 ]]; then
+        log_error "Expected exactly one adapter platform selector enabled in $CONFIG_FILE"
+        return 1
+    fi
+
+    for symbol in "${PLATFORM_SYMBOLS[@]}"; do
+        if config_enabled "$symbol"; then
+            case "$symbol" in
+            CONFIG_ACTRUST_ADAPTER_PLATFORM_LINUX)
+                platform="linux_x86"
+                ;;
+            CONFIG_ACTRUST_ADAPTER_PLATFORM_ANDROID)
+                platform="android"
+                ;;
+            CONFIG_ACTRUST_ADAPTER_PLATFORM_SIMCOM_A7606E)
+                platform="simcom_a7606e"
+                ;;
+            esac
+            echo "$platform"
+            return 0
+        fi
+    done
+
+    log_error "Unable to determine adapter platform from $CONFIG_FILE"
+    return 1
 }
 
 uses_simcom_toolchain() {
@@ -321,10 +478,30 @@ if [[ -n $PLATFORM ]]; then
     cp "$DEFCONFIG" "$ROOT_DIR/.config"
 fi
 
+if [[ ! -f $CONFIG_FILE ]]; then
+    log_error "Configuration file not found: $CONFIG_FILE"
+    if [[ -n $PLATFORM ]]; then
+        log_error "The '$PLATFORM' defconfig could not be applied."
+    else
+        log_error "Run ./build.sh <platform> to create it from a defconfig."
+    fi
+    exit 1
+fi
+
+if [[ -n $PLATFORM ]]; then
+    ACTIVE_PLATFORM="$PLATFORM"
+else
+    if ! ACTIVE_PLATFORM="$(config_platform_from_file)"; then
+        exit 1
+    fi
+fi
+
+validate_platform_cache "$ACTIVE_PLATFORM"
+
 # Generate configuration from Kconfig
 if [[ $SKIP_CONFIG -eq 0 ]]; then
-    log_info "Generating configuration files"
-    if ! "$ROOT_DIR/tools/genconfig.sh"; then
+    log_info "Generating configuration files in $CONFIG_OUTPUT_DIR"
+    if ! "$ROOT_DIR/tools/genconfig.sh" "$CONFIG_FILE" "$CONFIG_OUTPUT_DIR"; then
         log_error "Configuration generation failed"
         exit 1
     fi
@@ -332,13 +509,22 @@ else
     log_warn "Skipping configuration generation (--skip-config)"
 fi
 
+if ! validate_config_files; then
+    exit 1
+fi
+if ! validate_platform_config "$ACTIVE_PLATFORM"; then
+    exit 1
+fi
+
 # Configure CMake
+echo ""
 log_info "Configuring CMake (BUILD_TYPE=${BUILD_TYPE})"
 CMAKE_ARGS=(
     -S "$ROOT_DIR"
     -B "$BUILD_DIR"
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+    -DACTRUST_BUILD_PLATFORM="$ACTIVE_PLATFORM"
 )
 
 if [[ $BUILD_TESTS -eq 1 ]]; then
@@ -396,6 +582,7 @@ if ! cmake "${CMAKE_ARGS[@]}"; then
 fi
 
 # Build the project
+echo ""
 log_info "Building project (using $JOBS parallel jobs)"
 BUILD_ARGS=(
     --build "$BUILD_DIR"
@@ -549,6 +736,7 @@ if [[ $RUN_TESTS -eq 1 ]]; then
         exit 1
     fi
 
+    echo ""
     log_info "Running tests (label: ${TEST_LABEL})"
 
     CTEST_ARGS=(
@@ -561,11 +749,25 @@ if [[ $RUN_TESTS -eq 1 ]]; then
         CTEST_ARGS+=(--verbose)
     fi
 
-    if ! ctest "${CTEST_ARGS[@]}"; then
+    CTEST_LOG="$BUILD_DIR/ctest.log"
+    if ! ctest "${CTEST_ARGS[@]}" | tee "$CTEST_LOG"; then
         log_error "Tests failed"
         exit 1
     fi
 
+    echo ""
+    log_info "Code Layer Test Report"
+    awk -v report=layer -f "$ROOT_DIR/tools/ctest_summary.awk" "$CTEST_LOG"
+
+    echo ""
+    log_info "Test Form Report"
+    awk -v report=form -f "$ROOT_DIR/tools/ctest_summary.awk" "$CTEST_LOG"
+
+    echo ""
+    log_info "Environment Dependency Report"
+    awk -v report=environment -f "$ROOT_DIR/tools/ctest_summary.awk" "$CTEST_LOG"
+
+    echo ""
     log_info "All tests passed"
 fi
 

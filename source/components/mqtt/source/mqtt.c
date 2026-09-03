@@ -75,18 +75,33 @@ typedef enum {
     ACTRUST_MQTT_STATE_CONNECTED,
     ACTRUST_MQTT_STATE_CONNECTING,
     ACTRUST_MQTT_STATE_DISCONNECTED,
+    ACTRUST_MQTT_STATE_DISCONNECTING,
     ACTRUST_MQTT_STATE_WAITING_RECONNECT,
 } actrust_mqtt_state_t;
 
+typedef enum {
+    MQTT_LIFECYCLE_OPEN = 0,
+    MQTT_LIFECYCLE_CLOSING,
+} mqtt_lifecycle_state_t;
+
+typedef enum {
+    MQTT_SUBSCRIPTION_EMPTY = 0,
+    MQTT_SUBSCRIPTION_PENDING,
+    MQTT_SUBSCRIPTION_ACTIVE,
+    MQTT_UNSUBSCRIPTION_PENDING,
+} mqtt_subscription_state_t;
+
 /** @brief MQTT subscription topic. */
 typedef struct {
-    bool in_use;
-    char topic[ACTRUST_MQTT_TOPIC_MAX_LEN];
+    mqtt_subscription_state_t state;
+    uint32_t                  token;
+    char                      topic[ACTRUST_MQTT_TOPIC_MAX_LEN];
 } mqtt_subscription_topic_t;
 
 /** @brief Agent message context consumed by coreMQTT-Agent interface hooks. */
 struct MQTTAgentMessageContext {
     actrust_queue_t command_queue;
+    actrust_mqtt_t  mqtt;
 };
 
 typedef enum {
@@ -100,13 +115,17 @@ typedef enum {
 typedef struct mqtt_operation_base {
     mqtt_operation_type_t type;
     actrust_mqtt_t        mqtt;
+    uint32_t              generation;
+    size_t                subscription_index;
+    uint32_t              subscription_token;
 } mqtt_operation_base_t;
 
 typedef struct {
     mqtt_operation_base_t  base;
     MQTTAgentConnectArgs_t connect_args;
     MQTTConnectInfo_t      connect_info;
-    uint32_t               connect_generation;
+    size_t                 alloc_len;
+    char                   client_id[];
 } mqtt_connect_operation_t;
 
 typedef struct {
@@ -139,7 +158,17 @@ struct actrust_mqtt_ctx {
     actrust_mqtt_config_t     config;
     actrust_mqtt_callbacks_t  callbacks;
     actrust_mqtt_state_t      state;
+    mqtt_lifecycle_state_t    lifecycle;
     uint32_t                  connect_generation;
+    uint32_t                  next_subscription_token;
+    uint32_t                  api_inflight;
+    uint32_t                  callback_inflight;
+    uint32_t                  operation_inflight;
+    actrust_err_t             connect_result;
+    actrust_err_t             disconnect_result;
+    bool                      connect_result_valid;
+    bool                      disconnect_result_valid;
+    bool                      command_active;
     BackoffAlgorithmContext_t backoff_ctx;
 
     actrust_mutex_t            lock;
@@ -147,8 +176,12 @@ struct actrust_mqtt_ctx {
     mqtt_subscription_topic_t *subscriptions;
     actrust_crypto_ctx_t       crypto_ctx;
     actrust_sem_t              process_done_sem;
+    actrust_sem_t              command_done_sem;
+    actrust_sem_t              lifecycle_done_sem;
     bool                       process_running;
     bool                       process_stop_requested;
+    bool                       agent_cancelled;
+    bool                       deinit_inflight;
 };
 
 /* ========================================================================
@@ -160,19 +193,199 @@ static actrust_err_t mqtt_enqueue_connect_command(actrust_mqtt_t mqtt,
                                                   uint32_t connect_generation,
                                                   uint32_t block_time_ms);
 static actrust_err_t mqtt_enqueue_disconnect_command(actrust_mqtt_t mqtt,
+                                                     uint32_t       generation,
                                                      uint32_t block_time_ms);
 static actrust_err_t mqtt_enqueue_publish_command(
     actrust_mqtt_t mqtt, const actrust_mqtt_message_t *message,
+    uint32_t generation, uint32_t block_time_ms);
+static actrust_err_t mqtt_enqueue_subscribe_command(
+    actrust_mqtt_t mqtt, const char *topic, bool is_unsubscribe,
+    uint32_t generation, size_t subscription_index, uint32_t subscription_token,
     uint32_t block_time_ms);
-static actrust_err_t mqtt_enqueue_subscribe_command(actrust_mqtt_t mqtt,
-                                                    const char    *topic,
-                                                    bool     is_unsubscribe,
-                                                    uint32_t block_time_ms);
 static actrust_err_t mqtt_enqueue_status_to_actrust_err(MQTTStatus_t status);
+static actrust_err_t mqtt_status_to_actrust_err(MQTTStatus_t status);
+static uint32_t      mqtt_next_connect_generation_locked(actrust_mqtt_t mqtt);
 
 /* ========================================================================
  * Generic Helpers
  * ======================================================================== */
+
+static size_t mqtt_owned_string_len(const char *value)
+{
+    return value == NULL ? 0u : strlen(value) + 1u;
+}
+
+static void mqtt_owned_config_release(actrust_mqtt_config_t *config)
+{
+    if (config == NULL) {
+        return;
+    }
+
+    if (config->transport.type == ACTRUST_MQTT_TRANSPORT_TLS) {
+        actrust_tls_config_t *tls = &config->transport.config.tls;
+        actrust_secure_free((void *) tls->client_cert, tls->client_cert_len);
+        actrust_secure_free((void *) tls->ca, tls->ca_len);
+        actrust_secure_free((void *) tls->host,
+                            mqtt_owned_string_len(tls->host));
+    } else if (config->transport.type == ACTRUST_MQTT_TRANSPORT_TCP) {
+        const char *host = config->transport.config.tcp.host;
+        actrust_secure_free((void *) host, mqtt_owned_string_len(host));
+    }
+    actrust_secure_free((void *) config->client_id,
+                        mqtt_owned_string_len(config->client_id));
+    actrust_secure_zeroize(config, sizeof(*config));
+}
+
+static actrust_err_t mqtt_owned_string_copy(char **out, const char *input)
+{
+    size_t len;
+
+    if (out == NULL || input == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    len = strlen(input);
+    if (len == SIZE_MAX) {
+        return MQTT_ERR(ACTRUST_ERR_BUF_TOO_SMALL);
+    }
+    *out = (char *) ACTRUST_CALLOC(1u, len + 1u);
+    if (*out == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_NO_MEM);
+    }
+    memcpy(*out, input, len);
+    return ACTRUST_OK;
+}
+
+static actrust_err_t mqtt_owned_bytes_copy(uint8_t **out, const uint8_t *input,
+                                           size_t len)
+{
+    if (out == NULL || (input == NULL && len > 0u)) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    if (len == 0u) {
+        return ACTRUST_OK;
+    }
+
+    *out = (uint8_t *) ACTRUST_CALLOC(1u, len);
+    if (*out == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_NO_MEM);
+    }
+    memcpy(*out, input, len);
+    return ACTRUST_OK;
+}
+
+static actrust_err_t mqtt_config_validate(const actrust_mqtt_config_t *config)
+{
+    if (config == NULL || config->client_id == NULL ||
+        config->client_id[0] == '\0' ||
+        strlen(config->client_id) > UINT16_MAX) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    if (config->transport.type == ACTRUST_MQTT_TRANSPORT_TCP) {
+        const actrust_mqtt_tcp_config_t *tcp = &config->transport.config.tcp;
+        return (tcp->host != NULL && tcp->host[0] != '\0' && tcp->port != 0u)
+                   ? ACTRUST_OK
+                   : MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    if (config->transport.type != ACTRUST_MQTT_TRANSPORT_TLS) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    const actrust_tls_config_t *tls = &config->transport.config.tls;
+    if (tls->host == NULL || tls->host[0] == '\0' || tls->port == 0u ||
+        tls->crypto_ctx == NULL || (tls->ca == NULL && tls->ca_len > 0u) ||
+        (tls->ca != NULL && tls->ca_len == 0u) ||
+        (tls->client_cert == NULL && tls->client_cert_len > 0u) ||
+        (tls->client_cert != NULL && tls->client_cert_len == 0u) ||
+        ((tls->client_cert == NULL) != (tls->client_key == NULL)) ||
+        (tls->ca == NULL && tls->insecure == false)) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    if (tls->ca != NULL && tls->ca_format != ACTRUST_TLS_CERT_FORMAT_PEM &&
+        tls->ca_format != ACTRUST_TLS_CERT_FORMAT_DER) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    if (tls->client_cert != NULL &&
+        tls->client_cert_format != ACTRUST_TLS_CERT_FORMAT_PEM &&
+        tls->client_cert_format != ACTRUST_TLS_CERT_FORMAT_DER) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    return ACTRUST_OK;
+}
+
+static actrust_err_t mqtt_owned_config_clone(actrust_mqtt_config_t       *out,
+                                             const actrust_mqtt_config_t *input)
+{
+    actrust_err_t err;
+
+    if (out == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    err = mqtt_config_validate(input);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+
+    actrust_secure_zeroize(out, sizeof(*out));
+    out->transport.type = input->transport.type;
+
+    err = mqtt_owned_string_copy((char **) &out->client_id, input->client_id);
+    if (err != ACTRUST_OK) {
+        goto fail;
+    }
+
+    switch (input->transport.type) {
+        case ACTRUST_MQTT_TRANSPORT_TCP: {
+            const actrust_mqtt_tcp_config_t *src = &input->transport.config.tcp;
+            actrust_mqtt_tcp_config_t       *dst = &out->transport.config.tcp;
+            err = mqtt_owned_string_copy((char **) &dst->host, src->host);
+            if (err != ACTRUST_OK) {
+                goto fail;
+            }
+            dst->port = src->port;
+            break;
+        }
+        case ACTRUST_MQTT_TRANSPORT_TLS: {
+            const actrust_tls_config_t *src = &input->transport.config.tls;
+            actrust_tls_config_t       *dst = &out->transport.config.tls;
+            err = mqtt_owned_string_copy((char **) &dst->host, src->host);
+            if (err != ACTRUST_OK) {
+                goto fail;
+            }
+            dst->ca_len          = src->ca_len;
+            dst->client_cert_len = src->client_cert_len;
+            err = mqtt_owned_bytes_copy((uint8_t **) &dst->ca, src->ca,
+                                        src->ca_len);
+            if (err != ACTRUST_OK) {
+                goto fail;
+            }
+            err = mqtt_owned_bytes_copy((uint8_t **) &dst->client_cert,
+                                        src->client_cert, src->client_cert_len);
+            if (err != ACTRUST_OK) {
+                goto fail;
+            }
+            dst->port               = src->port;
+            dst->ca_len             = src->ca_len;
+            dst->ca_format          = src->ca_format;
+            dst->insecure           = src->insecure;
+            dst->client_cert_len    = src->client_cert_len;
+            dst->client_cert_format = src->client_cert_format;
+            dst->client_key         = src->client_key;
+            dst->crypto_ctx         = src->crypto_ctx;
+            break;
+        }
+        default:
+            err = MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+            goto fail;
+    }
+
+    return ACTRUST_OK;
+
+fail:
+    mqtt_owned_config_release(out);
+    return err;
+}
 
 static void mqtt_lock(actrust_mqtt_t mqtt)
 {
@@ -190,9 +403,96 @@ static void mqtt_unlock(actrust_mqtt_t mqtt)
 
 static void mqtt_set_state(actrust_mqtt_t mqtt, actrust_mqtt_state_t state)
 {
+    if (mqtt == NULL) {
+        return;
+    }
+
     mqtt_lock(mqtt);
     mqtt->state = state;
     mqtt_unlock(mqtt);
+}
+
+static bool mqtt_lifecycle_idle_locked(actrust_mqtt_t mqtt)
+{
+    return mqtt->api_inflight == 0u && mqtt->callback_inflight == 0u &&
+           mqtt->operation_inflight == 0u && mqtt->command_active == false &&
+           mqtt->process_running == false;
+}
+
+static void mqtt_signal_lifecycle_idle(actrust_mqtt_t mqtt)
+{
+    if (mqtt->lifecycle_done_sem != NULL) {
+        (void) actrust_sem_post(mqtt->lifecycle_done_sem);
+    }
+}
+
+static actrust_err_t mqtt_api_enter(actrust_mqtt_t mqtt)
+{
+    mqtt_lock(mqtt);
+    if (mqtt->lifecycle != MQTT_LIFECYCLE_OPEN) {
+        mqtt_unlock(mqtt);
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+    mqtt->api_inflight++;
+    mqtt_unlock(mqtt);
+    return ACTRUST_OK;
+}
+
+static void mqtt_api_leave(actrust_mqtt_t mqtt)
+{
+    bool idle;
+    mqtt_lock(mqtt);
+    if (mqtt->api_inflight > 0u) {
+        mqtt->api_inflight--;
+    }
+    idle = mqtt->lifecycle == MQTT_LIFECYCLE_CLOSING &&
+           mqtt_lifecycle_idle_locked(mqtt);
+    mqtt_unlock(mqtt);
+    if (idle) {
+        mqtt_signal_lifecycle_idle(mqtt);
+    }
+}
+
+static void mqtt_operation_enter(actrust_mqtt_t mqtt)
+{
+    mqtt_lock(mqtt);
+    mqtt->operation_inflight++;
+    mqtt_unlock(mqtt);
+}
+
+static void mqtt_operation_leave(actrust_mqtt_t mqtt)
+{
+    bool idle;
+    mqtt_lock(mqtt);
+    if (mqtt->operation_inflight > 0u) {
+        mqtt->operation_inflight--;
+    }
+    idle = mqtt->lifecycle == MQTT_LIFECYCLE_CLOSING &&
+           mqtt_lifecycle_idle_locked(mqtt);
+    mqtt_unlock(mqtt);
+    if (idle) {
+        mqtt_signal_lifecycle_idle(mqtt);
+    }
+}
+
+static actrust_err_t mqtt_wait_for_lifecycle_idle(actrust_mqtt_t mqtt,
+                                                  uint32_t       timeout_ms)
+{
+    uint64_t start_ms = actrust_monotonic_ms();
+
+    for (;;) {
+        mqtt_lock(mqtt);
+        bool idle = mqtt_lifecycle_idle_locked(mqtt);
+        mqtt_unlock(mqtt);
+        if (idle) {
+            return ACTRUST_OK;
+        }
+        if ((actrust_monotonic_ms() - start_ms) >= (uint64_t) timeout_ms) {
+            return MQTT_ERR(ACTRUST_ERR_TIMEOUT);
+        }
+        (void) actrust_sem_wait(mqtt->lifecycle_done_sem,
+                                ACTRUST_MQTT_WAIT_FOR_RESULT_MS);
+    }
 }
 
 static void mqtt_get_state(actrust_mqtt_t mqtt, actrust_mqtt_state_t *out_state)
@@ -202,6 +502,105 @@ static void mqtt_get_state(actrust_mqtt_t mqtt, actrust_mqtt_state_t *out_state)
     mqtt_unlock(mqtt);
 }
 
+static void mqtt_release_command_claim(actrust_mqtt_t mqtt)
+{
+    mqtt_lock(mqtt);
+    bool active          = mqtt->command_active;
+    mqtt->command_active = false;
+    mqtt_unlock(mqtt);
+    if (active && mqtt->command_done_sem != NULL) {
+        (void) actrust_sem_post(mqtt->command_done_sem);
+    }
+}
+
+static actrust_err_t mqtt_wait_for_command_claim(actrust_mqtt_t mqtt,
+                                                 uint32_t       timeout_ms)
+{
+    uint64_t start_ms = actrust_monotonic_ms();
+
+    for (;;) {
+        mqtt_lock(mqtt);
+        bool active = mqtt->command_active;
+        mqtt_unlock(mqtt);
+        if (active == false) {
+            return ACTRUST_OK;
+        }
+        if ((actrust_monotonic_ms() - start_ms) >= (uint64_t) timeout_ms) {
+            return MQTT_ERR(ACTRUST_ERR_TIMEOUT);
+        }
+        (void) actrust_sem_wait(mqtt->command_done_sem,
+                                ACTRUST_MQTT_WAIT_FOR_RESULT_MS);
+    }
+}
+
+static uint32_t mqtt_next_subscription_token_locked(actrust_mqtt_t mqtt)
+{
+    mqtt->next_subscription_token++;
+    if (mqtt->next_subscription_token == 0u) {
+        mqtt->next_subscription_token = 1u;
+    }
+    return mqtt->next_subscription_token;
+}
+
+static actrust_err_t mqtt_subscription_reserve_locked(actrust_mqtt_t mqtt,
+                                                      const char    *topic,
+                                                      bool      unsubscribe,
+                                                      size_t   *index,
+                                                      uint32_t *token)
+{
+    size_t found      = ACTRUST_MQTT_SUBSCRIPTION_MAX;
+    size_t free_index = ACTRUST_MQTT_SUBSCRIPTION_MAX;
+
+    for (size_t i = 0u; i < ACTRUST_MQTT_SUBSCRIPTION_MAX; ++i) {
+        mqtt_subscription_topic_t *slot = &mqtt->subscriptions[i];
+        if (slot->state != MQTT_SUBSCRIPTION_EMPTY &&
+            strcmp(slot->topic, topic) == 0) {
+            found = i;
+            break;
+        }
+        if (free_index == ACTRUST_MQTT_SUBSCRIPTION_MAX &&
+            slot->state == MQTT_SUBSCRIPTION_EMPTY) {
+            free_index = i;
+        }
+    }
+
+    if (unsubscribe) {
+        if (found == ACTRUST_MQTT_SUBSCRIPTION_MAX ||
+            mqtt->subscriptions[found].state != MQTT_SUBSCRIPTION_ACTIVE) {
+            return MQTT_ERR(ACTRUST_ERR_MQTT_UNSUBSCRIBE_FAILED);
+        }
+        *index                           = found;
+        mqtt->subscriptions[found].state = MQTT_UNSUBSCRIPTION_PENDING;
+    } else {
+        if (found != ACTRUST_MQTT_SUBSCRIPTION_MAX) {
+            return MQTT_ERR(ACTRUST_ERR_ALREADY);
+        }
+        if (free_index == ACTRUST_MQTT_SUBSCRIPTION_MAX) {
+            return MQTT_ERR(ACTRUST_ERR_NO_MEM);
+        }
+        *index                          = free_index;
+        mqtt_subscription_topic_t *slot = &mqtt->subscriptions[free_index];
+        slot->state                     = MQTT_SUBSCRIPTION_PENDING;
+        memcpy(slot->topic, topic, strlen(topic) + 1u);
+    }
+
+    *token = mqtt_next_subscription_token_locked(mqtt);
+    mqtt->subscriptions[*index].token = *token;
+    return ACTRUST_OK;
+}
+
+static void mqtt_subscription_clear_locked(actrust_mqtt_t mqtt, size_t index,
+                                           uint32_t token)
+{
+    if (index >= ACTRUST_MQTT_SUBSCRIPTION_MAX ||
+        mqtt->subscriptions[index].token != token) {
+        return;
+    }
+    mqtt->subscriptions[index].state = MQTT_SUBSCRIPTION_EMPTY;
+    mqtt->subscriptions[index].token = 0u;
+    memset(mqtt->subscriptions[index].topic, 0,
+           sizeof(mqtt->subscriptions[index].topic));
+}
 static uint32_t mqtt_next_connect_generation_locked(actrust_mqtt_t mqtt)
 {
     mqtt->connect_generation++;
@@ -212,28 +611,78 @@ static uint32_t mqtt_next_connect_generation_locked(actrust_mqtt_t mqtt)
     return mqtt->connect_generation;
 }
 
-static uint32_t mqtt_start_connect_attempt(actrust_mqtt_t mqtt)
+static actrust_err_t mqtt_begin_connect(actrust_mqtt_t        mqtt,
+                                        actrust_mqtt_state_t *previous_state,
+                                        uint32_t             *generation)
 {
-    uint32_t generation;
+    if (mqtt == NULL || previous_state == NULL || generation == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
 
     mqtt_lock(mqtt);
-    generation  = mqtt_next_connect_generation_locked(mqtt);
-    mqtt->state = ACTRUST_MQTT_STATE_CONNECTING;
-    mqtt_unlock(mqtt);
+    if (mqtt->state != ACTRUST_MQTT_STATE_INITIALIZED &&
+        (mqtt->state != ACTRUST_MQTT_STATE_DISCONNECTED ||
+         mqtt->process_running == true)) {
+        mqtt_unlock(mqtt);
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
 
-    return generation;
+    *previous_state            = mqtt->state;
+    *generation                = mqtt_next_connect_generation_locked(mqtt);
+    mqtt->state                = ACTRUST_MQTT_STATE_CONNECTING;
+    mqtt->connect_result_valid = false;
+    mqtt_unlock(mqtt);
+    return ACTRUST_OK;
 }
 
-static bool mqtt_complete_connect_attempt(actrust_mqtt_t       mqtt,
-                                          uint32_t             generation,
-                                          actrust_mqtt_state_t state)
+static void mqtt_release_connect_reservation(actrust_mqtt_t       mqtt,
+                                             uint32_t             generation,
+                                             actrust_mqtt_state_t state)
+{
+    mqtt_lock(mqtt);
+    if (mqtt->connect_generation == generation &&
+        mqtt->state == ACTRUST_MQTT_STATE_CONNECTING) {
+        mqtt->state = state;
+    }
+    mqtt_unlock(mqtt);
+}
+
+static actrust_err_t mqtt_install_config(actrust_mqtt_t         mqtt,
+                                         actrust_mqtt_config_t *candidate,
+                                         actrust_mqtt_config_t *replaced,
+                                         uint32_t               generation)
+{
+    if (mqtt == NULL || candidate == NULL || replaced == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    mqtt_lock(mqtt);
+    if (mqtt->connect_generation != generation ||
+        mqtt->state != ACTRUST_MQTT_STATE_CONNECTING) {
+        mqtt_unlock(mqtt);
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+
+    *replaced    = mqtt->config;
+    mqtt->config = *candidate;
+    actrust_secure_zeroize(candidate, sizeof(*candidate));
+    mqtt_unlock(mqtt);
+    return ACTRUST_OK;
+}
+
+static bool mqtt_complete_connect_attempt(actrust_mqtt_t mqtt,
+                                          uint32_t       generation,
+                                          MQTTStatus_t   status)
 {
     bool accepted = false;
 
     mqtt_lock(mqtt);
     if (mqtt->connect_generation == generation &&
         mqtt->state == ACTRUST_MQTT_STATE_CONNECTING) {
-        mqtt->state = state;
+        mqtt->connect_result       = mqtt_status_to_actrust_err(status);
+        mqtt->connect_result_valid = true;
+        mqtt->state = status == MQTTSuccess ? ACTRUST_MQTT_STATE_CONNECTED
+                                            : ACTRUST_MQTT_STATE_DISCONNECTED;
         accepted    = true;
     }
     mqtt_unlock(mqtt);
@@ -241,21 +690,30 @@ static bool mqtt_complete_connect_attempt(actrust_mqtt_t       mqtt,
     return accepted;
 }
 
-static bool mqtt_cancel_connect_attempt(actrust_mqtt_t mqtt,
+static void mqtt_cancel_connect_attempt(actrust_mqtt_t mqtt,
                                         uint32_t       generation)
 {
-    bool connected = false;
-
     mqtt_lock(mqtt);
-    if (mqtt->state == ACTRUST_MQTT_STATE_CONNECTED) {
-        connected = true;
-    } else if (mqtt->connect_generation == generation) {
+    if (mqtt->connect_generation == generation &&
+        mqtt->connect_result_valid == false) {
         (void) mqtt_next_connect_generation_locked(mqtt);
-        mqtt->state = ACTRUST_MQTT_STATE_DISCONNECTED;
+        mqtt->connect_result_valid = false;
+        mqtt->state                = ACTRUST_MQTT_STATE_DISCONNECTED;
     }
     mqtt_unlock(mqtt);
+}
 
-    return connected;
+static void mqtt_abort_disconnect(actrust_mqtt_t mqtt, uint32_t generation)
+{
+    mqtt_lock(mqtt);
+    if (mqtt->connect_generation == generation &&
+        mqtt->state == ACTRUST_MQTT_STATE_DISCONNECTING &&
+        mqtt->disconnect_result_valid == false) {
+        (void) mqtt_next_connect_generation_locked(mqtt);
+        mqtt->disconnect_result_valid = false;
+        mqtt->state                   = ACTRUST_MQTT_STATE_DISCONNECTED;
+    }
+    mqtt_unlock(mqtt);
 }
 
 static void mqtt_drain_process_done(actrust_mqtt_t mqtt)
@@ -295,6 +753,10 @@ static actrust_err_t mqtt_mark_process_started(actrust_mqtt_t mqtt)
     mqtt_drain_process_done(mqtt);
 
     mqtt_lock(mqtt);
+    if (mqtt->lifecycle != MQTT_LIFECYCLE_OPEN) {
+        mqtt_unlock(mqtt);
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
     if (mqtt->process_running == true) {
         mqtt_unlock(mqtt);
         return MQTT_ERR(ACTRUST_ERR_BUSY);
@@ -318,7 +780,7 @@ static void mqtt_mark_process_stopped(actrust_mqtt_t mqtt)
     }
 }
 
-static actrust_err_t mqtt_signal_process_stop(actrust_mqtt_t mqtt)
+static actrust_err_t mqtt_signal_process_stop_internal(actrust_mqtt_t mqtt)
 {
     bool running = false;
 
@@ -339,6 +801,17 @@ static actrust_err_t mqtt_signal_process_stop(actrust_mqtt_t mqtt)
 
     MQTTStatus_t status = MQTTAgent_Terminate(&mqtt->agent_ctx, &cmd_info);
     return mqtt_enqueue_status_to_actrust_err(status);
+}
+
+static actrust_err_t mqtt_signal_process_stop(actrust_mqtt_t mqtt)
+{
+    mqtt_lock(mqtt);
+    if (mqtt->lifecycle != MQTT_LIFECYCLE_OPEN) {
+        mqtt_unlock(mqtt);
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+    mqtt_unlock(mqtt);
+    return mqtt_signal_process_stop_internal(mqtt);
 }
 
 static actrust_err_t mqtt_wait_for_process_stop(actrust_mqtt_t mqtt,
@@ -383,44 +856,53 @@ static bool mqtt_sleep_stopped(actrust_mqtt_t mqtt, uint32_t timeout_ms)
 }
 
 static actrust_err_t mqtt_wait_for_connect_result(actrust_mqtt_t mqtt,
+                                                  uint32_t       generation,
                                                   uint32_t       timeout_ms)
 {
     uint64_t start_ms = actrust_monotonic_ms();
 
     for (;;) {
-        actrust_mqtt_state_t state;
-        mqtt_get_state(mqtt, &state);
-        if (state == ACTRUST_MQTT_STATE_CONNECTED) {
-            return ACTRUST_OK;
+        mqtt_lock(mqtt);
+        if (mqtt->connect_result_valid) {
+            actrust_err_t result = mqtt->connect_result;
+            mqtt_unlock(mqtt);
+            return result;
         }
-        if (state == ACTRUST_MQTT_STATE_DISCONNECTED) {
+        if (mqtt->connect_generation != generation) {
+            mqtt_unlock(mqtt);
             return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
         }
+        mqtt_unlock(mqtt);
 
         if ((actrust_monotonic_ms() - start_ms) >= (uint64_t) timeout_ms) {
             return MQTT_ERR(ACTRUST_ERR_TIMEOUT);
         }
-
         actrust_sleep_ms(ACTRUST_MQTT_WAIT_FOR_RESULT_MS);
     }
 }
 
 static actrust_err_t mqtt_wait_for_disconnect_result(actrust_mqtt_t mqtt,
+                                                     uint32_t       generation,
                                                      uint32_t       timeout_ms)
 {
     uint64_t start_ms = actrust_monotonic_ms();
 
     for (;;) {
-        actrust_mqtt_state_t state;
-        mqtt_get_state(mqtt, &state);
-        if (state == ACTRUST_MQTT_STATE_DISCONNECTED) {
-            return ACTRUST_OK;
+        mqtt_lock(mqtt);
+        if (mqtt->disconnect_result_valid) {
+            actrust_err_t result = mqtt->disconnect_result;
+            mqtt_unlock(mqtt);
+            return result;
         }
+        if (mqtt->connect_generation != generation) {
+            mqtt_unlock(mqtt);
+            return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+        }
+        mqtt_unlock(mqtt);
 
         if ((actrust_monotonic_ms() - start_ms) >= (uint64_t) timeout_ms) {
             return MQTT_ERR(ACTRUST_ERR_TIMEOUT);
         }
-
         actrust_sleep_ms(ACTRUST_MQTT_WAIT_FOR_RESULT_MS);
     }
 }
@@ -583,6 +1065,7 @@ static void mqtt_transport_close(actrust_mqtt_t mqtt)
         return;
     }
 
+    mqtt_lock(mqtt);
     switch (mqtt->net_ctx.type) {
         case ACTRUST_MQTT_TRANSPORT_TLS:
             if (mqtt->net_ctx.handle.tls != NULL) {
@@ -600,6 +1083,7 @@ static void mqtt_transport_close(actrust_mqtt_t mqtt)
         default:
             break;
     }
+    mqtt_unlock(mqtt);
 }
 
 static actrust_err_t mqtt_tcp_open(actrust_mqtt_t mqtt)
@@ -664,54 +1148,19 @@ static actrust_err_t mqtt_transport_open(actrust_mqtt_t mqtt)
  * Subscription Helpers
  * ======================================================================== */
 
-static actrust_err_t mqtt_subscription_store(actrust_mqtt_t mqtt,
-                                             const char    *topic)
+static void mqtt_subscription_rollback_locked(actrust_mqtt_t mqtt, size_t index,
+                                              uint32_t                  token,
+                                              mqtt_subscription_state_t state)
 {
-    mqtt_lock(mqtt);
-    size_t free_index = ACTRUST_MQTT_SUBSCRIPTION_MAX;
-    for (size_t i = 0u; i < ACTRUST_MQTT_SUBSCRIPTION_MAX; ++i) {
-        if (mqtt->subscriptions[i].in_use == true) {
-            if (strcmp(mqtt->subscriptions[i].topic, topic) == 0) {
-                mqtt_unlock(mqtt);
-                return ACTRUST_OK; // Already subscribed to this topic.
-            }
-            continue;
-        }
-
-        if (free_index == ACTRUST_MQTT_SUBSCRIPTION_MAX) {
-            free_index = i;
-        }
+    if (index >= ACTRUST_MQTT_SUBSCRIPTION_MAX ||
+        mqtt->subscriptions[index].token != token) {
+        return;
     }
-
-    if (free_index == ACTRUST_MQTT_SUBSCRIPTION_MAX) {
-        mqtt_unlock(mqtt);
-        return MQTT_ERR(ACTRUST_ERR_NO_MEM); // No free slots available.
+    if (state == MQTT_SUBSCRIPTION_EMPTY) {
+        mqtt_subscription_clear_locked(mqtt, index, token);
+    } else {
+        mqtt->subscriptions[index].state = state;
     }
-
-    mqtt->subscriptions[free_index].in_use = true;
-    memset(mqtt->subscriptions[free_index].topic, 0,
-           ACTRUST_MQTT_TOPIC_MAX_LEN);
-    memcpy(mqtt->subscriptions[free_index].topic, topic, strlen(topic));
-    mqtt_unlock(mqtt);
-    return ACTRUST_OK;
-}
-
-static actrust_err_t mqtt_subscription_remove(actrust_mqtt_t mqtt,
-                                              const char    *topic)
-{
-    mqtt_lock(mqtt);
-    for (size_t i = 0u; i < ACTRUST_MQTT_SUBSCRIPTION_MAX; ++i) {
-        if (mqtt->subscriptions[i].in_use == true &&
-            strcmp(mqtt->subscriptions[i].topic, topic) == 0) {
-            mqtt->subscriptions[i].in_use = false;
-            memset(mqtt->subscriptions[i].topic, 0, ACTRUST_MQTT_TOPIC_MAX_LEN);
-            mqtt_unlock(mqtt);
-            return ACTRUST_OK; // Topic found and removed.
-        }
-    }
-
-    mqtt_unlock(mqtt);
-    return MQTT_ERR(ACTRUST_ERR_MQTT_UNSUBSCRIBE_FAILED); // Topic not found.
 }
 
 /* ========================================================================
@@ -735,21 +1184,67 @@ static bool mqtt_agent_send(MQTTAgentMessageContext_t *pMsgCtx,
     return false;
 }
 
+static bool mqtt_agent_release_command(MQTTAgentCommand_t *pCommandToRelease);
+
 static bool mqtt_agent_recv(MQTTAgentMessageContext_t *pMsgCtx,
                             MQTTAgentCommand_t       **pReceivedCommand,
                             uint32_t                   blockTimeMs)
 {
     if (pMsgCtx == NULL || pMsgCtx->command_queue == NULL ||
-        pReceivedCommand == NULL) {
+        pMsgCtx->mqtt == NULL || pReceivedCommand == NULL) {
         return false;
     }
 
-    if (actrust_queue_pop(pMsgCtx->command_queue, pReceivedCommand,
-                          blockTimeMs) == ACTRUST_OK) {
-        return true; // Command received from queue successfully.
-    }
+    mqtt_release_command_claim(pMsgCtx->mqtt);
 
-    return false;
+    for (;;) {
+        if (actrust_queue_pop(pMsgCtx->command_queue, pReceivedCommand,
+                              blockTimeMs) != ACTRUST_OK) {
+            mqtt_lock(pMsgCtx->mqtt);
+            pMsgCtx->mqtt->command_active = true;
+            mqtt_unlock(pMsgCtx->mqtt);
+            return false;
+        }
+
+        MQTTAgentCommand_t *command = *pReceivedCommand;
+        if (command == NULL || command->commandType == NONE ||
+            command->commandType == PROCESSLOOP ||
+            command->commandType == PING || command->commandType == TERMINATE) {
+            mqtt_lock(pMsgCtx->mqtt);
+            pMsgCtx->mqtt->command_active = true;
+            mqtt_unlock(pMsgCtx->mqtt);
+            return true;
+        }
+
+        mqtt_operation_base_t *base =
+            (mqtt_operation_base_t *) command->pCmdContext;
+        mqtt_lock(pMsgCtx->mqtt);
+        bool valid =
+            base != NULL &&
+            base->generation == pMsgCtx->mqtt->connect_generation &&
+            ((base->type == MQTT_OPERATION_CONNECT &&
+              pMsgCtx->mqtt->state == ACTRUST_MQTT_STATE_CONNECTING) ||
+             (base->type == MQTT_OPERATION_DISCONNECT &&
+              pMsgCtx->mqtt->state == ACTRUST_MQTT_STATE_DISCONNECTING) ||
+             ((base->type == MQTT_OPERATION_PUBLISH ||
+               base->type == MQTT_OPERATION_SUBSCRIBE ||
+               base->type == MQTT_OPERATION_UNSUBSCRIBE) &&
+              pMsgCtx->mqtt->state == ACTRUST_MQTT_STATE_CONNECTED));
+        if (valid) {
+            pMsgCtx->mqtt->command_active = true;
+        }
+        mqtt_unlock(pMsgCtx->mqtt);
+        if (valid) {
+            return true;
+        }
+
+        if (command->pCommandCompleteCallback != NULL) {
+            MQTTAgentReturnInfo_t info = { .returnCode = MQTTRecvFailed };
+            command->pCommandCompleteCallback(command->pCmdContext, &info);
+        }
+        mqtt_agent_release_command(command);
+        *pReceivedCommand = NULL;
+    }
 }
 
 static MQTTAgentCommand_t *mqtt_agent_get_command(uint32_t blockTimeMs)
@@ -784,9 +1279,20 @@ static void mqtt_incoming_publish_callback(
 
     actrust_mqtt_t mqtt =
         (actrust_mqtt_t) pMqttAgentContext->pIncomingCallbackContext;
-    if (mqtt == NULL || mqtt->callbacks.on_message == NULL) {
+    if (mqtt == NULL) {
         return;
     }
+
+    actrust_mqtt_callbacks_t callbacks;
+    mqtt_lock(mqtt);
+    if (mqtt->lifecycle != MQTT_LIFECYCLE_OPEN ||
+        mqtt->callbacks.on_message == NULL) {
+        mqtt_unlock(mqtt);
+        return;
+    }
+    callbacks = mqtt->callbacks;
+    mqtt->callback_inflight++;
+    mqtt_unlock(mqtt);
 
     actrust_mqtt_message_t message;
     memset(&message, 0, sizeof(message));
@@ -802,7 +1308,17 @@ static void mqtt_incoming_publish_callback(
     LOG_DEBUG("MQTT inbound topic: %.*s", (int) message.topic_len,
               message.topic);
 
-    mqtt->callbacks.on_message(mqtt->callbacks.user_ctx, &message);
+    callbacks.on_message(callbacks.user_ctx, &message);
+    mqtt_lock(mqtt);
+    if (mqtt->callback_inflight > 0u) {
+        mqtt->callback_inflight--;
+    }
+    bool idle = mqtt->lifecycle == MQTT_LIFECYCLE_CLOSING &&
+                mqtt_lifecycle_idle_locked(mqtt);
+    mqtt_unlock(mqtt);
+    if (idle) {
+        mqtt_signal_lifecycle_idle(mqtt);
+    }
 }
 
 static void mqtt_replay_subscriptions(actrust_mqtt_t mqtt)
@@ -811,25 +1327,47 @@ static void mqtt_replay_subscriptions(actrust_mqtt_t mqtt)
         return;
     }
 
-    mqtt_lock(mqtt);
     for (size_t i = 0u; i < ACTRUST_MQTT_SUBSCRIPTION_MAX; ++i) {
-        if (mqtt->subscriptions[i].in_use == true) { // Topic is in use.
-            char topic[ACTRUST_MQTT_TOPIC_MAX_LEN] = { 0 };
-            memcpy(topic, mqtt->subscriptions[i].topic,
-                   ACTRUST_MQTT_TOPIC_MAX_LEN);
-            (void) mqtt_enqueue_subscribe_command(
-                mqtt, topic, false, ACTRUST_MQTT_CMD_BLOCK_TIME_MS);
+        char     topic[ACTRUST_MQTT_TOPIC_MAX_LEN];
+        uint32_t generation;
+        uint32_t token;
+
+        mqtt_lock(mqtt);
+        mqtt_subscription_topic_t *slot = &mqtt->subscriptions[i];
+        if (slot->state != MQTT_SUBSCRIPTION_ACTIVE) {
+            mqtt_unlock(mqtt);
+            continue;
+        }
+        generation  = mqtt->connect_generation;
+        token       = mqtt_next_subscription_token_locked(mqtt);
+        slot->state = MQTT_SUBSCRIPTION_PENDING;
+        slot->token = token;
+        memcpy(topic, slot->topic, strlen(slot->topic) + 1u);
+        mqtt_unlock(mqtt);
+
+        actrust_err_t err = mqtt_enqueue_subscribe_command(
+            mqtt, topic, false, generation, i, token,
+            ACTRUST_MQTT_CMD_BLOCK_TIME_MS);
+        if (err != ACTRUST_OK) {
+            mqtt_lock(mqtt);
+            mqtt_subscription_rollback_locked(mqtt, i, token,
+                                              MQTT_SUBSCRIPTION_ACTIVE);
+            mqtt_unlock(mqtt);
         }
     }
-    mqtt_unlock(mqtt);
 }
 
 static void mqtt_agent_command_complete(
     MQTTAgentCommandContext_t *pCmdCallbackContext,
     MQTTAgentReturnInfo_t     *pReturnInfo)
 {
-    if (pCmdCallbackContext == NULL || pReturnInfo == NULL) {
+    if (pCmdCallbackContext == NULL) {
         return;
+    }
+
+    MQTTAgentReturnInfo_t fallback_info = { .returnCode = MQTTRecvFailed };
+    if (pReturnInfo == NULL) {
+        pReturnInfo = &fallback_info;
     }
 
     mqtt_operation_base_t *base = (mqtt_operation_base_t *) pCmdCallbackContext;
@@ -857,36 +1395,85 @@ static void mqtt_agent_command_complete(
         case MQTT_OPERATION_CONNECT: {
             mqtt_connect_operation_t *connect_op =
                 (mqtt_connect_operation_t *) base;
-            if (status == MQTTSuccess) {
-                bool accepted = mqtt_complete_connect_attempt(
-                    base->mqtt, connect_op->connect_generation,
-                    ACTRUST_MQTT_STATE_CONNECTED);
-                if (accepted == true &&
-                    connect_op->connect_args.sessionPresent == false) {
-                    mqtt_replay_subscriptions(
-                        base->mqtt); // Replay subscriptions if session is not
-                                     // present.
-                }
-            } else {
-                (void) mqtt_complete_connect_attempt(
-                    base->mqtt, connect_op->connect_generation,
-                    ACTRUST_MQTT_STATE_DISCONNECTED);
+            bool accepted = mqtt_complete_connect_attempt(
+                base->mqtt, base->generation, status);
+            if (accepted && status == MQTTSuccess &&
+                connect_op->connect_args.sessionPresent == false) {
+                mqtt_replay_subscriptions(base->mqtt);
             }
             break;
         }
         case MQTT_OPERATION_DISCONNECT:
-            mqtt_set_state(base->mqtt, ACTRUST_MQTT_STATE_DISCONNECTED);
+            mqtt_lock(base->mqtt);
+            if (base->generation == base->mqtt->connect_generation &&
+                base->mqtt->state == ACTRUST_MQTT_STATE_DISCONNECTING) {
+                base->mqtt->disconnect_result =
+                    mqtt_status_to_actrust_err(status);
+                base->mqtt->disconnect_result_valid = true;
+                if (status == MQTTSuccess) {
+                    base->mqtt->state = ACTRUST_MQTT_STATE_DISCONNECTED;
+                } else {
+                    base->mqtt->state = ACTRUST_MQTT_STATE_CONNECTED;
+                }
+            }
+            mqtt_unlock(base->mqtt);
             break;
+        case MQTT_OPERATION_SUBSCRIBE:
+        case MQTT_OPERATION_UNSUBSCRIBE: {
+            mqtt_lock(base->mqtt);
+            bool current =
+                base->generation == base->mqtt->connect_generation &&
+                base->subscription_index < ACTRUST_MQTT_SUBSCRIPTION_MAX &&
+                base->mqtt->subscriptions[base->subscription_index].token ==
+                    base->subscription_token;
+            if (current) {
+                bool accepted = status == MQTTSuccess;
+                if (base->type == MQTT_OPERATION_SUBSCRIBE) {
+                    accepted =
+                        accepted && pReturnInfo->pSubackCodes != NULL &&
+                        pReturnInfo->pSubackCodes[0] != MQTTSubAckFailure;
+                    if (accepted) {
+                        base->mqtt->subscriptions[base->subscription_index]
+                            .state = MQTT_SUBSCRIPTION_ACTIVE;
+                    } else {
+                        mqtt_subscription_clear_locked(
+                            base->mqtt, base->subscription_index,
+                            base->subscription_token);
+                    }
+                } else if (accepted) {
+                    mqtt_subscription_clear_locked(base->mqtt,
+                                                   base->subscription_index,
+                                                   base->subscription_token);
+                } else {
+                    base->mqtt->subscriptions[base->subscription_index].state =
+                        MQTT_SUBSCRIPTION_ACTIVE;
+                }
+            }
+            mqtt_unlock(base->mqtt);
+            break;
+        }
         default:
             if (status == MQTTSendFailed || status == MQTTRecvFailed ||
                 status == MQTTKeepAliveTimeout) {
-                mqtt_set_state(base->mqtt,
-                               ACTRUST_MQTT_STATE_WAITING_RECONNECT);
+                mqtt_lock(base->mqtt);
+                if (base->generation == base->mqtt->connect_generation &&
+                    base->mqtt->state == ACTRUST_MQTT_STATE_CONNECTED) {
+                    base->mqtt->state = ACTRUST_MQTT_STATE_WAITING_RECONNECT;
+                }
+                mqtt_unlock(base->mqtt);
             }
             break;
     }
 
-    ACTRUST_FREE(base);
+    actrust_mqtt_t mqtt = base->mqtt;
+    if (base->type == MQTT_OPERATION_CONNECT) {
+        mqtt_connect_operation_t *connect_op =
+            (mqtt_connect_operation_t *) base;
+        actrust_secure_free(connect_op, connect_op->alloc_len);
+    } else {
+        ACTRUST_FREE(base);
+    }
+    mqtt_operation_leave(mqtt);
 }
 
 /* ========================================================================
@@ -898,20 +1485,35 @@ static actrust_err_t mqtt_enqueue_connect_command(actrust_mqtt_t mqtt,
                                                   uint32_t connect_generation,
                                                   uint32_t block_time_ms)
 {
-    mqtt_connect_operation_t *op =
-        (mqtt_connect_operation_t *) ACTRUST_CALLOC(1, sizeof(*op));
+    size_t                    client_id_len;
+    size_t                    alloc_len;
+    mqtt_connect_operation_t *op;
+    MQTTStatus_t              status;
+
+    if (mqtt == NULL || mqtt->config.client_id == NULL) {
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+    client_id_len = strlen(mqtt->config.client_id);
+    if (client_id_len > UINT16_MAX || client_id_len == SIZE_MAX ||
+        client_id_len + 1u > SIZE_MAX - sizeof(*op)) {
+        return MQTT_ERR(ACTRUST_ERR_BUF_TOO_SMALL);
+    }
+    alloc_len = sizeof(*op) + client_id_len + 1u;
+    op        = (mqtt_connect_operation_t *) ACTRUST_CALLOC(1u, alloc_len);
     if (op == NULL) {
         return MQTT_ERR(ACTRUST_ERR_NO_MEM);
     }
 
-    op->base.type          = MQTT_OPERATION_CONNECT;
-    op->base.mqtt          = mqtt;
-    op->connect_generation = connect_generation;
+    op->base.type       = MQTT_OPERATION_CONNECT;
+    op->base.mqtt       = mqtt;
+    op->base.generation = connect_generation;
+    op->alloc_len       = alloc_len;
+    memcpy(op->client_id, mqtt->config.client_id, client_id_len + 1u);
 
     op->connect_info.cleanSession           = clean_session;
     op->connect_info.keepAliveSeconds       = CONFIG_ACTRUST_MQTT_KEEPALIVE_SEC;
-    op->connect_info.pClientIdentifier      = mqtt->config.client_id;
-    op->connect_info.clientIdentifierLength = strlen(mqtt->config.client_id);
+    op->connect_info.pClientIdentifier      = op->client_id;
+    op->connect_info.clientIdentifierLength = client_id_len;
 
     op->connect_args.pConnectInfo = &op->connect_info;
     op->connect_args.pWillInfo    = NULL;
@@ -923,16 +1525,18 @@ static actrust_err_t mqtt_enqueue_connect_command(actrust_mqtt_t mqtt,
         .blockTimeMs                 = block_time_ms,
     };
 
-    MQTTStatus_t status =
-        MQTTAgent_Connect(&mqtt->agent_ctx, &op->connect_args, &cmd_info);
+    mqtt_operation_enter(mqtt);
+    status = MQTTAgent_Connect(&mqtt->agent_ctx, &op->connect_args, &cmd_info);
     if (status != MQTTSuccess) {
-        ACTRUST_FREE(op);
+        mqtt_operation_leave(mqtt);
+        actrust_secure_free(op, alloc_len);
     }
 
     return mqtt_enqueue_status_to_actrust_err(status);
 }
 
 static actrust_err_t mqtt_enqueue_disconnect_command(actrust_mqtt_t mqtt,
+                                                     uint32_t       generation,
                                                      uint32_t block_time_ms)
 {
     mqtt_simple_operation_t *op =
@@ -941,8 +1545,9 @@ static actrust_err_t mqtt_enqueue_disconnect_command(actrust_mqtt_t mqtt,
         return MQTT_ERR(ACTRUST_ERR_NO_MEM);
     }
 
-    op->base.type = MQTT_OPERATION_DISCONNECT;
-    op->base.mqtt = mqtt;
+    op->base.type       = MQTT_OPERATION_DISCONNECT;
+    op->base.mqtt       = mqtt;
+    op->base.generation = generation;
 
     MQTTAgentCommandInfo_t cmd_info = {
         .cmdCompleteCallback         = mqtt_agent_command_complete,
@@ -950,8 +1555,10 @@ static actrust_err_t mqtt_enqueue_disconnect_command(actrust_mqtt_t mqtt,
         .blockTimeMs                 = block_time_ms,
     };
 
+    mqtt_operation_enter(mqtt);
     MQTTStatus_t status = MQTTAgent_Disconnect(&mqtt->agent_ctx, &cmd_info);
     if (status != MQTTSuccess) {
+        mqtt_operation_leave(mqtt);
         ACTRUST_FREE(op);
     }
 
@@ -960,7 +1567,7 @@ static actrust_err_t mqtt_enqueue_disconnect_command(actrust_mqtt_t mqtt,
 
 static actrust_err_t mqtt_enqueue_publish_command(
     actrust_mqtt_t mqtt, const actrust_mqtt_message_t *message,
-    uint32_t block_time_ms)
+    uint32_t generation, uint32_t block_time_ms)
 {
     mqtt_publish_operation_t *op =
         (mqtt_publish_operation_t *) ACTRUST_CALLOC(1, sizeof(*op));
@@ -968,8 +1575,9 @@ static actrust_err_t mqtt_enqueue_publish_command(
         return MQTT_ERR(ACTRUST_ERR_NO_MEM);
     }
 
-    op->base.type = MQTT_OPERATION_PUBLISH;
-    op->base.mqtt = mqtt;
+    op->base.type       = MQTT_OPERATION_PUBLISH;
+    op->base.mqtt       = mqtt;
+    op->base.generation = generation;
 
     memcpy(op->topic, message->topic, message->topic_len);
     op->topic[message->topic_len] = '\0';
@@ -991,9 +1599,11 @@ static actrust_err_t mqtt_enqueue_publish_command(
         .blockTimeMs                 = block_time_ms,
     };
 
+    mqtt_operation_enter(mqtt);
     MQTTStatus_t status =
         MQTTAgent_Publish(&mqtt->agent_ctx, &op->publish_info, &cmd_info);
     if (status != MQTTSuccess) {
+        mqtt_operation_leave(mqtt);
         ACTRUST_FREE(op);
     } else {
         LOG_INFO("MQTT outbound message: topic_len=%u payload_len=%zu qos=%d",
@@ -1006,10 +1616,10 @@ static actrust_err_t mqtt_enqueue_publish_command(
     return mqtt_enqueue_status_to_actrust_err(status);
 }
 
-static actrust_err_t mqtt_enqueue_subscribe_command(actrust_mqtt_t mqtt,
-                                                    const char    *topic,
-                                                    bool     is_unsubscribe,
-                                                    uint32_t block_time_ms)
+static actrust_err_t mqtt_enqueue_subscribe_command(
+    actrust_mqtt_t mqtt, const char *topic, bool is_unsubscribe,
+    uint32_t generation, size_t subscription_index, uint32_t subscription_token,
+    uint32_t block_time_ms)
 {
     mqtt_subscribe_operation_t *op =
         (mqtt_subscribe_operation_t *) ACTRUST_CALLOC(1, sizeof(*op));
@@ -1019,8 +1629,11 @@ static actrust_err_t mqtt_enqueue_subscribe_command(actrust_mqtt_t mqtt,
 
     op->base.type =
         is_unsubscribe ? MQTT_OPERATION_UNSUBSCRIBE : MQTT_OPERATION_SUBSCRIBE;
-    op->base.mqtt    = mqtt;
-    size_t topic_len = strlen(topic);
+    op->base.mqtt               = mqtt;
+    op->base.generation         = generation;
+    op->base.subscription_index = subscription_index;
+    op->base.subscription_token = subscription_token;
+    size_t topic_len            = strlen(topic);
 
     memcpy(op->topic, topic, topic_len);
     op->topic[topic_len] = '\0';
@@ -1037,6 +1650,7 @@ static actrust_err_t mqtt_enqueue_subscribe_command(actrust_mqtt_t mqtt,
         .blockTimeMs                 = block_time_ms,
     };
 
+    mqtt_operation_enter(mqtt);
     MQTTStatus_t status = MQTTSuccess;
     if (is_unsubscribe == true) {
         status = MQTTAgent_Unsubscribe(&mqtt->agent_ctx, &op->subscribe_args,
@@ -1047,6 +1661,7 @@ static actrust_err_t mqtt_enqueue_subscribe_command(actrust_mqtt_t mqtt,
     }
 
     if (status != MQTTSuccess) {
+        mqtt_operation_leave(mqtt);
         ACTRUST_FREE(op);
     }
 
@@ -1075,8 +1690,26 @@ static actrust_err_t mqtt_try_schedule_connect(actrust_mqtt_t mqtt)
         return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
     }
 
+    mqtt_lock(mqtt);
+    uint32_t generation = mqtt_next_connect_generation_locked(mqtt);
+    mqtt->state         = ACTRUST_MQTT_STATE_CONNECTING;
+    for (size_t i = 0u; i < ACTRUST_MQTT_SUBSCRIPTION_MAX; ++i) {
+        mqtt_subscription_topic_t *slot = &mqtt->subscriptions[i];
+        if (slot->state == MQTT_SUBSCRIPTION_PENDING) {
+            mqtt_subscription_clear_locked(mqtt, i, slot->token);
+        } else if (slot->state == MQTT_UNSUBSCRIPTION_PENDING) {
+            slot->state = MQTT_SUBSCRIPTION_ACTIVE;
+        }
+    }
+    mqtt_unlock(mqtt);
+
     actrust_err_t ret = mqtt_transport_open(mqtt);
     if (ret != ACTRUST_OK) {
+        mqtt_lock(mqtt);
+        if (mqtt->connect_generation == generation) {
+            mqtt->state = ACTRUST_MQTT_STATE_WAITING_RECONNECT;
+        }
+        mqtt_unlock(mqtt);
         return ret;
     }
 
@@ -1104,7 +1737,12 @@ static actrust_err_t mqtt_try_schedule_connect(actrust_mqtt_t mqtt)
         return mqtt_status_to_actrust_err(status);
     }
 
-    mqtt_set_state(mqtt, ACTRUST_MQTT_STATE_CONNECTED);
+    mqtt_lock(mqtt);
+    if (mqtt->connect_generation == generation &&
+        mqtt->state == ACTRUST_MQTT_STATE_CONNECTING) {
+        mqtt->state = ACTRUST_MQTT_STATE_CONNECTED;
+    }
+    mqtt_unlock(mqtt);
     if (session_present == false) {
         mqtt_replay_subscriptions(mqtt);
     }
@@ -1164,6 +1802,18 @@ actrust_err_t actrust_mqtt_init(actrust_mqtt_t *out_mqtt)
         goto fail;
     }
 
+    ret = actrust_sem_create(&mqtt->command_done_sem, 0u);
+    if (ret != ACTRUST_OK) {
+        ret = MQTT_ERR(ACTRUST_ERR_HW_FAILURE);
+        goto fail;
+    }
+
+    ret = actrust_sem_create(&mqtt->lifecycle_done_sem, 0u);
+    if (ret != ACTRUST_OK) {
+        ret = MQTT_ERR(ACTRUST_ERR_HW_FAILURE);
+        goto fail;
+    }
+
     mqtt->network_buffer.pBuffer =
         (uint8_t *) ACTRUST_CALLOC(1, (size_t) ACTRUST_MQTT_NET_BUF_SIZE);
     if (mqtt->network_buffer.pBuffer == NULL) {
@@ -1197,6 +1847,7 @@ actrust_err_t actrust_mqtt_init(actrust_mqtt_t *out_mqtt)
     mqtt->transport.pNetworkContext = &mqtt->net_ctx;
 
     mqtt->message_ctx.command_queue        = mqtt->command_queue;
+    mqtt->message_ctx.mqtt                 = mqtt;
     mqtt->message_interface.pMsgCtx        = &mqtt->message_ctx;
     mqtt->message_interface.send           = mqtt_agent_send;
     mqtt->message_interface.recv           = mqtt_agent_recv;
@@ -1222,10 +1873,19 @@ fail:
     (void) actrust_queue_destroy(&mqtt->command_queue);
     ACTRUST_FREE(mqtt->subscriptions);
     ACTRUST_FREE(mqtt->network_buffer.pBuffer);
+    (void) actrust_sem_destroy(mqtt->lifecycle_done_sem);
+    (void) actrust_sem_destroy(mqtt->command_done_sem);
     (void) actrust_sem_destroy(mqtt->process_done_sem);
     (void) actrust_mutex_destroy(mqtt->lock);
     ACTRUST_FREE(mqtt);
     return ret;
+}
+
+static void mqtt_deinit_abort(actrust_mqtt_t mqtt)
+{
+    mqtt_lock(mqtt);
+    mqtt->deinit_inflight = false;
+    mqtt_unlock(mqtt);
 }
 
 actrust_err_t actrust_mqtt_deinit(actrust_mqtt_t mqtt)
@@ -1234,32 +1894,123 @@ actrust_err_t actrust_mqtt_deinit(actrust_mqtt_t mqtt)
         return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    actrust_mqtt_state_t state;
-    mqtt_get_state(mqtt, &state);
-    if (state == ACTRUST_MQTT_STATE_CONNECTED ||
-        state == ACTRUST_MQTT_STATE_CONNECTING) {
+    mqtt_lock(mqtt);
+    if (mqtt->callback_inflight > 0u || mqtt->deinit_inflight == true) {
+        mqtt_unlock(mqtt);
         return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
     }
+    if (mqtt->lifecycle == MQTT_LIFECYCLE_OPEN &&
+        (mqtt->state == ACTRUST_MQTT_STATE_CONNECTED ||
+         mqtt->state == ACTRUST_MQTT_STATE_CONNECTING)) {
+        mqtt_unlock(mqtt);
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+    if (mqtt->lifecycle == MQTT_LIFECYCLE_OPEN) {
+        mqtt->lifecycle = MQTT_LIFECYCLE_CLOSING;
+    }
+    mqtt->deinit_inflight        = true;
+    mqtt->process_stop_requested = true;
+    mqtt_unlock(mqtt);
 
     if (mqtt_is_process_running(mqtt) == true) {
-        (void) mqtt_signal_process_stop(mqtt);
-        actrust_err_t err = mqtt_wait_for_process_stop(
-            mqtt, ACTRUST_MQTT_PROCESS_STOP_TIMEOUT_MS);
+        actrust_err_t err = mqtt_signal_process_stop_internal(mqtt);
         if (err != ACTRUST_OK) {
+            mqtt_lock(mqtt);
+            mqtt->deinit_inflight = false;
+            mqtt_unlock(mqtt);
+            return err;
+        }
+        err = mqtt_wait_for_process_stop(mqtt,
+                                         ACTRUST_MQTT_PROCESS_STOP_TIMEOUT_MS);
+        if (err != ACTRUST_OK) {
+            mqtt_lock(mqtt);
+            mqtt->deinit_inflight = false;
+            mqtt_unlock(mqtt);
             return err;
         }
     }
 
-    (void) MQTTAgent_CancelAll(&mqtt->agent_ctx);
-    mqtt_transport_close(mqtt);
-    (void) actrust_crypto_deinit(&mqtt->crypto_ctx);
-    (void) actrust_queue_destroy(&mqtt->command_queue);
-    ACTRUST_FREE(mqtt->subscriptions);
-    ACTRUST_FREE(mqtt->network_buffer.pBuffer);
-    (void) actrust_sem_destroy(mqtt->process_done_sem);
-    (void) actrust_mutex_destroy(mqtt->lock);
-    ACTRUST_FREE(mqtt);
+    actrust_err_t err =
+        mqtt_wait_for_command_claim(mqtt, ACTRUST_MQTT_PROCESS_STOP_TIMEOUT_MS);
+    if (err != ACTRUST_OK) {
+        mqtt_deinit_abort(mqtt);
+        return err;
+    }
+    MQTTStatus_t status = MQTTSuccess;
+    if (mqtt->agent_cancelled == false) {
+        status = MQTTAgent_CancelAll(&mqtt->agent_ctx);
+        if (status != MQTTSuccess) {
+            mqtt_lock(mqtt);
+            mqtt->deinit_inflight = false;
+            mqtt_unlock(mqtt);
+            return mqtt_status_to_actrust_err(status);
+        }
+        mqtt->agent_cancelled = true;
+    }
+    mqtt_release_command_claim(mqtt);
 
+    err = mqtt_wait_for_lifecycle_idle(mqtt,
+                                       ACTRUST_MQTT_PROCESS_STOP_TIMEOUT_MS);
+    if (err != ACTRUST_OK) {
+        mqtt_lock(mqtt);
+        mqtt->deinit_inflight = false;
+        mqtt_unlock(mqtt);
+        return err;
+    }
+
+    mqtt_transport_close(mqtt);
+    mqtt_owned_config_release(&mqtt->config);
+    if (mqtt->crypto_ctx != NULL) {
+        err = actrust_crypto_deinit(&mqtt->crypto_ctx);
+        if (err != ACTRUST_OK) {
+            mqtt_deinit_abort(mqtt);
+            return err;
+        }
+    }
+    if (mqtt->command_queue != NULL) {
+        err = actrust_queue_destroy(&mqtt->command_queue);
+        if (err != ACTRUST_OK) {
+            mqtt_deinit_abort(mqtt);
+            return err;
+        }
+    }
+    ACTRUST_FREE(mqtt->subscriptions);
+    mqtt->subscriptions = NULL;
+    ACTRUST_FREE(mqtt->network_buffer.pBuffer);
+    mqtt->network_buffer.pBuffer = NULL;
+    if (mqtt->lifecycle_done_sem != NULL) {
+        err = actrust_sem_destroy(mqtt->lifecycle_done_sem);
+        if (err != ACTRUST_OK) {
+            mqtt_deinit_abort(mqtt);
+            return err;
+        }
+        mqtt->lifecycle_done_sem = NULL;
+    }
+    if (mqtt->command_done_sem != NULL) {
+        err = actrust_sem_destroy(mqtt->command_done_sem);
+        if (err != ACTRUST_OK) {
+            mqtt_deinit_abort(mqtt);
+            return err;
+        }
+        mqtt->command_done_sem = NULL;
+    }
+    if (mqtt->process_done_sem != NULL) {
+        err = actrust_sem_destroy(mqtt->process_done_sem);
+        if (err != ACTRUST_OK) {
+            mqtt_deinit_abort(mqtt);
+            return err;
+        }
+        mqtt->process_done_sem = NULL;
+    }
+    if (mqtt->lock != NULL) {
+        err = actrust_mutex_destroy(mqtt->lock);
+        if (err != ACTRUST_OK) {
+            mqtt_deinit_abort(mqtt);
+            return err;
+        }
+        mqtt->lock = NULL;
+    }
+    ACTRUST_FREE(mqtt);
     return ACTRUST_OK;
 }
 
@@ -1269,52 +2020,71 @@ actrust_err_t actrust_mqtt_set_callbacks(
     if (mqtt == NULL || callbacks == NULL) {
         return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
     }
-
-    actrust_mqtt_state_t state;
-    mqtt_get_state(mqtt, &state);
-    if (state == ACTRUST_MQTT_STATE_CONNECTED ||
-        state == ACTRUST_MQTT_STATE_CONNECTING) {
-        return MQTT_ERR(
-            ACTRUST_ERR_BAD_STATE); // Already connected or connecting.
+    actrust_err_t err = mqtt_api_enter(mqtt);
+    if (err != ACTRUST_OK) {
+        return err;
     }
-
     mqtt_lock(mqtt);
+    if (mqtt->state == ACTRUST_MQTT_STATE_CONNECTED ||
+        mqtt->state == ACTRUST_MQTT_STATE_CONNECTING) {
+        mqtt_unlock(mqtt);
+        mqtt_api_leave(mqtt);
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
     mqtt->callbacks = *callbacks;
     mqtt_unlock(mqtt);
-
+    mqtt_api_leave(mqtt);
     return ACTRUST_OK;
 }
 
 actrust_err_t actrust_mqtt_connect(actrust_mqtt_t               mqtt,
                                    const actrust_mqtt_config_t *config)
 {
-    if (mqtt == NULL || config == NULL || config->client_id == NULL) {
+    actrust_mqtt_config_t candidate;
+    actrust_mqtt_config_t replaced;
+    actrust_mqtt_state_t  previous_state;
+    uint32_t              connect_generation;
+    actrust_err_t         err;
+
+    if (mqtt == NULL || config == NULL) {
         return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    mqtt_lock(mqtt);
-    mqtt->config = *config;
-    mqtt_unlock(mqtt);
-
-    actrust_mqtt_state_t state;
-    mqtt_get_state(mqtt, &state);
-    if (state == ACTRUST_MQTT_STATE_CONNECTED ||
-        state == ACTRUST_MQTT_STATE_CONNECTING) {
-        return MQTT_ERR(
-            ACTRUST_ERR_BAD_STATE); // Already connected or connecting.
+    err = mqtt_api_enter(mqtt);
+    if (err != ACTRUST_OK) {
+        return err;
     }
 
-    if (state != ACTRUST_MQTT_STATE_INITIALIZED &&
-        state != ACTRUST_MQTT_STATE_DISCONNECTED) {
-        return MQTT_ERR(
-            ACTRUST_ERR_BAD_STATE); // Not in a valid state to connect.
+    err = mqtt_begin_connect(mqtt, &previous_state, &connect_generation);
+    if (err != ACTRUST_OK) {
+        mqtt_api_leave(mqtt);
+        return err;
     }
 
-    uint32_t connect_generation = mqtt_start_connect_attempt(mqtt);
+    actrust_secure_zeroize(&candidate, sizeof(candidate));
+    actrust_secure_zeroize(&replaced, sizeof(replaced));
+    err = mqtt_owned_config_clone(&candidate, config);
+    if (err != ACTRUST_OK) {
+        mqtt_release_connect_reservation(mqtt, connect_generation,
+                                         previous_state);
+        mqtt_api_leave(mqtt);
+        return err;
+    }
 
-    actrust_err_t err = mqtt_transport_open(mqtt);
+    err = mqtt_install_config(mqtt, &candidate, &replaced, connect_generation);
+    if (err != ACTRUST_OK) {
+        mqtt_owned_config_release(&candidate);
+        mqtt_release_connect_reservation(mqtt, connect_generation,
+                                         previous_state);
+        mqtt_api_leave(mqtt);
+        return err;
+    }
+    mqtt_owned_config_release(&replaced);
+
+    err = mqtt_transport_open(mqtt);
     if (err != ACTRUST_OK) {
         mqtt_set_state(mqtt, ACTRUST_MQTT_STATE_DISCONNECTED);
+        mqtt_api_leave(mqtt);
         return err;
     }
 
@@ -1323,21 +2093,24 @@ actrust_err_t actrust_mqtt_connect(actrust_mqtt_t               mqtt,
     if (err != ACTRUST_OK) {
         mqtt_transport_close(mqtt);
         mqtt_set_state(mqtt, ACTRUST_MQTT_STATE_DISCONNECTED);
+        mqtt_api_leave(mqtt);
         return err;
     }
 
-    err = mqtt_wait_for_connect_result(mqtt,
+    err = mqtt_wait_for_connect_result(mqtt, connect_generation,
                                        ACTRUST_MQTT_CONNECT_WAIT_TIMEOUT_MS);
     if (err != ACTRUST_OK) {
-        if (mqtt_cancel_connect_attempt(mqtt, connect_generation) == true) {
-            return ACTRUST_OK;
+        mqtt_cancel_connect_attempt(mqtt, connect_generation);
+        actrust_err_t claim_err = mqtt_wait_for_command_claim(
+            mqtt, ACTRUST_MQTT_CONNECT_WAIT_TIMEOUT_MS);
+        if (claim_err == ACTRUST_OK) {
+            mqtt_transport_close(mqtt);
         }
-        mqtt_transport_close(mqtt);
-        mqtt_set_state(mqtt, ACTRUST_MQTT_STATE_DISCONNECTED);
+        mqtt_api_leave(mqtt);
         return err;
     }
 
-    mqtt_set_state(mqtt, ACTRUST_MQTT_STATE_CONNECTED);
+    mqtt_api_leave(mqtt);
     return ACTRUST_OK;
 }
 
@@ -1347,26 +2120,41 @@ actrust_err_t actrust_mqtt_disconnect(actrust_mqtt_t mqtt)
         return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    actrust_mqtt_state_t state;
-    mqtt_get_state(mqtt, &state);
-    if (state != ACTRUST_MQTT_STATE_CONNECTED) {
-        return MQTT_ERR(ACTRUST_ERR_BAD_STATE); // Not connected.
-    }
-
-    actrust_err_t err =
-        mqtt_enqueue_disconnect_command(mqtt, ACTRUST_MQTT_CMD_BLOCK_TIME_MS);
+    actrust_err_t err = mqtt_api_enter(mqtt);
     if (err != ACTRUST_OK) {
         return err;
     }
-
+    mqtt_lock(mqtt);
+    if (mqtt->state != ACTRUST_MQTT_STATE_CONNECTED) {
+        mqtt_unlock(mqtt);
+        mqtt_api_leave(mqtt);
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+    uint32_t generation           = mqtt->connect_generation;
+    mqtt->state                   = ACTRUST_MQTT_STATE_DISCONNECTING;
+    mqtt->disconnect_result_valid = false;
+    err = mqtt_enqueue_disconnect_command(mqtt, generation,
+                                          ACTRUST_MQTT_CMD_BLOCK_TIME_MS);
+    if (err != ACTRUST_OK) {
+        mqtt->state = ACTRUST_MQTT_STATE_CONNECTED;
+    }
+    mqtt_unlock(mqtt);
+    if (err != ACTRUST_OK) {
+        mqtt_api_leave(mqtt);
+        return err;
+    }
     err = mqtt_wait_for_disconnect_result(
-        mqtt, CONFIG_ACTRUST_MQTT_CONNECT_TIMEOUT_MS);
+        mqtt, generation, CONFIG_ACTRUST_MQTT_CONNECT_TIMEOUT_MS);
     if (err != ACTRUST_OK) {
-        return err;
+        mqtt_abort_disconnect(mqtt, generation);
+        actrust_err_t claim_err = mqtt_wait_for_command_claim(
+            mqtt, ACTRUST_MQTT_CONNECT_WAIT_TIMEOUT_MS);
+        if (claim_err == ACTRUST_OK) {
+            mqtt_transport_close(mqtt);
+        }
     }
-
-    mqtt_set_state(mqtt, ACTRUST_MQTT_STATE_DISCONNECTED);
-    return ACTRUST_OK;
+    mqtt_api_leave(mqtt);
+    return err;
 }
 
 actrust_err_t actrust_mqtt_publish(actrust_mqtt_t                mqtt,
@@ -1376,8 +2164,10 @@ actrust_err_t actrust_mqtt_publish(actrust_mqtt_t                mqtt,
         return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    if (message->topic_len == 0u ||
-        message->topic_len >= ACTRUST_MQTT_TOPIC_MAX_LEN ||
+    if (message->topic_len == 0u) {
+        return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+    if (message->topic_len >= ACTRUST_MQTT_TOPIC_MAX_LEN ||
         message->payload_len > CONFIG_ACTRUST_MQTT_PAYLOAD_MAX_LEN) {
         return MQTT_ERR(ACTRUST_ERR_BUF_TOO_SMALL);
     }
@@ -1386,20 +2176,22 @@ actrust_err_t actrust_mqtt_publish(actrust_mqtt_t                mqtt,
         return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    actrust_mqtt_state_t state;
-    mqtt_get_state(mqtt, &state);
-
-    if (state != ACTRUST_MQTT_STATE_CONNECTED) {
-        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
-    }
-
-    actrust_err_t err = mqtt_enqueue_publish_command(
-        mqtt, message, ACTRUST_MQTT_CMD_BLOCK_TIME_MS);
+    actrust_err_t err = mqtt_api_enter(mqtt);
     if (err != ACTRUST_OK) {
         return err;
     }
-
-    return ACTRUST_OK;
+    mqtt_lock(mqtt);
+    if (mqtt->state != ACTRUST_MQTT_STATE_CONNECTED) {
+        mqtt_unlock(mqtt);
+        mqtt_api_leave(mqtt);
+        return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+    uint32_t generation = mqtt->connect_generation;
+    err = mqtt_enqueue_publish_command(mqtt, message, generation,
+                                       ACTRUST_MQTT_CMD_BLOCK_TIME_MS);
+    mqtt_unlock(mqtt);
+    mqtt_api_leave(mqtt);
+    return err;
 }
 
 actrust_err_t actrust_mqtt_subscribe(actrust_mqtt_t mqtt, const char *topic)
@@ -1413,26 +2205,34 @@ actrust_err_t actrust_mqtt_subscribe(actrust_mqtt_t mqtt, const char *topic)
         return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    actrust_mqtt_state_t state;
-    mqtt_get_state(mqtt, &state);
-
-    if (state != ACTRUST_MQTT_STATE_CONNECTED) {
+    actrust_err_t err = mqtt_api_enter(mqtt);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+    mqtt_lock(mqtt);
+    if (mqtt->state != ACTRUST_MQTT_STATE_CONNECTED) {
+        mqtt_unlock(mqtt);
+        mqtt_api_leave(mqtt);
         return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
     }
 
-    actrust_err_t ret = mqtt_subscription_store(mqtt, topic);
-    if (ret != ACTRUST_OK) {
-        return ret;
+    uint32_t      generation = mqtt->connect_generation;
+    size_t        index;
+    uint32_t      token;
+    actrust_err_t ret =
+        mqtt_subscription_reserve_locked(mqtt, topic, false, &index, &token);
+    if (ret == ACTRUST_OK) {
+        ret = mqtt_enqueue_subscribe_command(mqtt, topic, false, generation,
+                                             index, token,
+                                             ACTRUST_MQTT_CMD_BLOCK_TIME_MS);
+        if (ret != ACTRUST_OK) {
+            mqtt_subscription_rollback_locked(mqtt, index, token,
+                                              MQTT_SUBSCRIPTION_EMPTY);
+        }
     }
-
-    ret = mqtt_enqueue_subscribe_command(mqtt, topic, false,
-                                         ACTRUST_MQTT_CMD_BLOCK_TIME_MS);
-    if (ret != ACTRUST_OK) {
-        (void) mqtt_subscription_remove(mqtt, topic);
-        return ret;
-    }
-
-    return ACTRUST_OK;
+    mqtt_unlock(mqtt);
+    mqtt_api_leave(mqtt);
+    return ret;
 }
 
 actrust_err_t actrust_mqtt_unsubscribe(actrust_mqtt_t mqtt, const char *topic)
@@ -1446,21 +2246,34 @@ actrust_err_t actrust_mqtt_unsubscribe(actrust_mqtt_t mqtt, const char *topic)
         return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    actrust_mqtt_state_t state;
-    mqtt_get_state(mqtt, &state);
-
-    if (state != ACTRUST_MQTT_STATE_CONNECTED) {
+    actrust_err_t err = mqtt_api_enter(mqtt);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+    mqtt_lock(mqtt);
+    if (mqtt->state != ACTRUST_MQTT_STATE_CONNECTED) {
+        mqtt_unlock(mqtt);
+        mqtt_api_leave(mqtt);
         return MQTT_ERR(ACTRUST_ERR_BAD_STATE);
     }
 
-    actrust_err_t ret = mqtt_enqueue_subscribe_command(
-        mqtt, topic, true, ACTRUST_MQTT_CMD_BLOCK_TIME_MS);
-    if (ret != ACTRUST_OK) {
-        return ret;
+    uint32_t      generation = mqtt->connect_generation;
+    size_t        index;
+    uint32_t      token;
+    actrust_err_t ret =
+        mqtt_subscription_reserve_locked(mqtt, topic, true, &index, &token);
+    if (ret == ACTRUST_OK) {
+        ret = mqtt_enqueue_subscribe_command(mqtt, topic, true, generation,
+                                             index, token,
+                                             ACTRUST_MQTT_CMD_BLOCK_TIME_MS);
+        if (ret != ACTRUST_OK) {
+            mqtt_subscription_rollback_locked(mqtt, index, token,
+                                              MQTT_SUBSCRIPTION_ACTIVE);
+        }
     }
-
-    (void) mqtt_subscription_remove(mqtt, topic);
-    return ACTRUST_OK;
+    mqtt_unlock(mqtt);
+    mqtt_api_leave(mqtt);
+    return ret;
 }
 
 actrust_err_t actrust_mqtt_process(actrust_mqtt_t mqtt)
@@ -1469,8 +2282,14 @@ actrust_err_t actrust_mqtt_process(actrust_mqtt_t mqtt)
         return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    actrust_err_t ret = mqtt_mark_process_started(mqtt);
+    actrust_err_t ret = mqtt_api_enter(mqtt);
     if (ret != ACTRUST_OK) {
+        return ret;
+    }
+
+    ret = mqtt_mark_process_started(mqtt);
+    if (ret != ACTRUST_OK) {
+        mqtt_api_leave(mqtt);
         return ret;
     }
 
@@ -1489,6 +2308,7 @@ actrust_err_t actrust_mqtt_process(actrust_mqtt_t mqtt)
         bool                 should_reconnect = false;
         bool                 stop_requested   = false;
 
+        mqtt_release_command_claim(mqtt);
         mqtt_get_state(mqtt, &state);
         stop_requested = mqtt_is_process_stop_requested(mqtt);
 
@@ -1512,6 +2332,13 @@ actrust_err_t actrust_mqtt_process(actrust_mqtt_t mqtt)
         }
 
         if (should_reconnect) {
+            mqtt_lock(mqtt);
+            bool closing = mqtt->lifecycle == MQTT_LIFECYCLE_CLOSING;
+            mqtt_unlock(mqtt);
+            if (closing) {
+                ret = ACTRUST_OK;
+                break;
+            }
             mqtt_set_state(mqtt, ACTRUST_MQTT_STATE_WAITING_RECONNECT);
         } else {
             ret = mqtt_status_to_actrust_err(status);
@@ -1528,8 +2355,14 @@ actrust_err_t actrust_mqtt_process(actrust_mqtt_t mqtt)
         }
     }
 
-    mqtt_set_state(mqtt, ACTRUST_MQTT_STATE_DISCONNECTED);
+    mqtt_lock(mqtt);
+    bool closing = mqtt->lifecycle == MQTT_LIFECYCLE_CLOSING;
+    mqtt_unlock(mqtt);
+    if (!closing) {
+        mqtt_set_state(mqtt, ACTRUST_MQTT_STATE_DISCONNECTED);
+    }
     mqtt_mark_process_stopped(mqtt);
+    mqtt_api_leave(mqtt);
 
     return ret;
 }
@@ -1540,5 +2373,11 @@ actrust_err_t actrust_mqtt_stop_process(actrust_mqtt_t mqtt)
         return MQTT_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    return mqtt_signal_process_stop(mqtt);
+    actrust_err_t err = mqtt_api_enter(mqtt);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+    err = mqtt_signal_process_stop(mqtt);
+    mqtt_api_leave(mqtt);
+    return err;
 }

@@ -416,6 +416,33 @@ static actrust_err_t sw_crypto_key_destroy(actrust_crypto_ctx_t ctx,
     return actrust_sec_store_delete(keyid_to_slotid(key_id));
 }
 
+static actrust_err_t sw_crypto_key_migrate(actrust_crypto_ctx_t ctx,
+                                           uint32_t             source_id,
+                                           uint32_t             target_id)
+{
+    if (ctx == NULL || source_id == target_id) {
+        return CRYPTO_ERR(ACTRUST_ERR_INVALID_ARG);
+    }
+
+    actrust_crypto_key_t source_key = NULL;
+    actrust_err_t        err = sw_crypto_key_open(ctx, source_id, &source_key);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+
+    key_blob_t blob;
+    size_t     blob_len = 0u;
+    memset(&blob, 0, sizeof(blob));
+    err = key_serialize(source_key, &blob, &blob_len);
+    if (err == ACTRUST_OK) {
+        err = actrust_sec_store_write(keyid_to_slotid(target_id),
+                                      (const uint8_t *) &blob, blob_len);
+    }
+    mbedtls_platform_zeroize(&blob, sizeof(blob));
+    (void) sw_crypto_key_close(ctx, &source_key);
+    return err;
+}
+
 static actrust_err_t sw_crypto_key_generate_ec_impl(
     actrust_crypto_ctx_t ctx, actrust_crypto_ec_curve_t curve, uint32_t key_id,
     actrust_crypto_key_t *out_key)
@@ -1104,6 +1131,7 @@ const crypto_backend_ops_t sw_crypto_ops = {
     .key_generate      = sw_crypto_key_generate,
     .key_import        = sw_crypto_key_import,
     .key_destroy       = sw_crypto_key_destroy,
+    .key_migrate       = sw_crypto_key_migrate,
     .key_export_public = sw_crypto_key_export_public,
     .ecdsa_sign        = sw_crypto_ecdsa_sign,
     .ecdsa_verify      = sw_crypto_ecdsa_verify,

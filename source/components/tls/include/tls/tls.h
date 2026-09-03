@@ -142,7 +142,11 @@ typedef struct actrust_tls_ctx *actrust_tls_t;
  *
  * @param[out] out_tls     Receives TLS handle on success.
  * @param[in]  cfg         TLS connection configuration.
- * @param[in]  timeout_ms  Timeout budget in milliseconds for connect/handshake.
+ * @param[in]  timeout_ms  One total timeout budget in milliseconds covering
+ *                         DNS resolution, TCP connect, and TLS handshake.
+ *                         Time spent in an earlier stage reduces the budget
+ *                         available to later stages. Zero permits one immediate
+ *                         attempt and does not allow unbounded retries.
  *
  * @return @c ACTRUST_OK on success.
  * @return Error with reason @c ACTRUST_ERR_INVALID_ARG for invalid arguments.
@@ -171,13 +175,17 @@ actrust_err_t actrust_tls_connect(actrust_tls_t              *out_tls,
  * @brief Close TLS session and underlying TCP connection, then release handle.
  *
  * When @p tls references a valid handle, @p *tls is set to NULL after local
- * cleanup even if the underlying socket close reports an error.
+ * cleanup even if close-notify times out or the underlying socket close reports
+ * an error. The timeout covers all close-notify retries; zero permits one
+ * immediate attempt.
  *
  * @param[in,out] tls         Pointer to TLS handle.
  * @param[in]     timeout_ms  Timeout in milliseconds for close_notify/close.
  *
  * @return @c ACTRUST_OK on success.
  * @return Error with reason @c ACTRUST_ERR_INVALID_ARG for invalid handle.
+ * @return Error with reason @c ACTRUST_ERR_TIMEOUT if close-notify exhausts the
+ *         operation budget; local cleanup still completes.
  * @return Errors from @ref actrust_net_close may be returned after cleanup.
  */
 actrust_err_t actrust_tls_close(actrust_tls_t *tls, uint32_t timeout_ms);
@@ -191,7 +199,9 @@ actrust_err_t actrust_tls_close(actrust_tls_t *tls, uint32_t timeout_ms);
  * @param[in]  tls            TLS handle.
  * @param[in]  buf            Source buffer.
  * @param[in]  len            Bytes requested to write.
- * @param[in]  timeout_ms     Operation timeout in milliseconds.
+ * @param[in]  timeout_ms     Total operation timeout in milliseconds, including
+ *                            all internal WANT_READ/WANT_WRITE retries. Zero
+ *                            permits one immediate attempt.
  * @param[out] bytes_written  Receives number of bytes actually written.
  *
  * @return @c ACTRUST_OK on success (including partial write).
@@ -218,7 +228,9 @@ actrust_err_t actrust_tls_write(actrust_tls_t tls, const uint8_t *buf,
  * @param[in]  tls         TLS handle.
  * @param[out] buf         Destination buffer.
  * @param[in]  len         Buffer capacity in bytes.
- * @param[in]  timeout_ms  Operation timeout in milliseconds.
+ * @param[in]  timeout_ms  Total operation timeout in milliseconds, including
+ *                         all internal WANT_READ/WANT_WRITE retries. Zero
+ *                         permits one immediate attempt.
  * @param[out] bytes_read  Receives number of bytes actually read.
  *
  * @return @c ACTRUST_OK on success (including partial read).

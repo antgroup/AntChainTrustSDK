@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Release SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag to validate
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    name: Validate and publish SDK release
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Configure build environment
+        run: echo "BUILD_DIR=${RUNNER_TEMP}/actrust-release" >> "${GITHUB_ENV}"
+
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Verify protected main ancestry
+        run: |
+          git fetch origin main --no-tags
+          release_commit="$(git rev-list -n 1 "${RELEASE_TAG}")"
+          main_commit="$(git rev-list -n 1 origin/main)"
+          git merge-base --is-ancestor "${release_commit}" "${main_commit}"
+
+      - name: Install release tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential cmake doxygen binutils tar
+
+      - name: Validate release metadata and public API
+        run: |
+          test "${RELEASE_TAG}" = "v$(<VERSION)"
+          baseline_tag="$(git tag --sort=-version:refname --merged "${RELEASE_TAG}" \
+            | grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+$' \
+            | grep -v -F "${RELEASE_TAG}" | head -n 1)"
+          test -n "${baseline_tag}"
+          python3 tools/release/check_release.py \
+            --release-tag "${RELEASE_TAG}" \
+            --api \
+            --baseline-tag "${baseline_tag}"
+
+      - name: Build ABI baseline
+        run: |
+          baseline_tag="$(git tag --sort=-version:refname --merged "${RELEASE_TAG}" \
+            | grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+$' \
+            | grep -v -F "${RELEASE_TAG}" | head -n 1)"
+          test -n "${baseline_tag}"
+          git worktree add --detach "${RUNNER_TEMP}/actrust-baseline" "${baseline_tag}"
+          git -C "${RUNNER_TEMP}/actrust-baseline" submodule update --init --recursive
+          (
+            cd "${RUNNER_TEMP}/actrust-baseline"
+            BUILD_DIR="${RUNNER_TEMP}/actrust-baseline-build" \
+              ./build.sh linux_x86 --clean-build
+          )
+          echo "ABI_BASELINE_DIR=${RUNNER_TEMP}/actrust-baseline-build" >> "${GITHUB_ENV}"
+
+      - name: Build and test Linux x86 release bundle
+        run: ./build.sh linux_x86 --clean-build --build-tests
+
+      - name: Run package and offline test gates
+        run: |
+          ctest --test-dir "${BUILD_DIR}" --output-on-failure \
+            --label-regex 'unit|package'
+
+      - name: Build versioned API documentation
+        run: |
+          doxygen Doxyfile
+          doc_dir="docs/v$(<VERSION)"
+          test -f "${doc_dir}/html/index.html"
+
+      - name: Verify bundle metadata and checksum
+        run: |
+          cmake --build "${BUILD_DIR}" --target actrust_sdk_bundle
+          python3 tools/release/check_release.py --release-tag "${RELEASE_TAG}"
+          python3 tools/release/check_release.py \
+            --abi-baseline "${ABI_BASELINE_DIR}" \
+            --abi-current "${BUILD_DIR}" \
+            --abi-header-baseline "${RUNNER_TEMP}/actrust-baseline" \
+            --abi-header-current "${GITHUB_WORKSPACE}"
+          test -s "${BUILD_DIR}/AntChainTrustSDK-$(<VERSION)-linux_x86.tar.gz"
+          test -s "${BUILD_DIR}/AntChainTrustSDK-$(<VERSION)-linux_x86.tar.gz.sha256"
+          test -s "${BUILD_DIR}/bundle-metadata/sbom.spdx.json"
+
+      - name: Sign release bundle
+        env:
+          ACTRUST_SIGN_COMMAND: ${{ secrets.ACTRUST_SIGN_COMMAND }}
+          ACTRUST_VERIFY_COMMAND: ${{ secrets.ACTRUST_VERIFY_COMMAND }}
+        run: |
+          bundle="${BUILD_DIR}/AntChainTrustSDK-$(<VERSION)-linux_x86.tar.gz"
+          tools/release/sign_artifact.sh "${bundle}" "${bundle}.sig"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          generate_release_notes: false
+          body_path: docs/releases/${{ env.RELEASE_TAG }}.md
+          files: |
+            ${{ env.BUILD_DIR }}/AntChainTrustSDK-*.tar.gz
+            ${{ env.BUILD_DIR }}/AntChainTrustSDK-*.tar.gz.sha256
+            ${{ env.BUILD_DIR }}/AntChainTrustSDK-*.tar.gz.sig
+            ${{ env.BUILD_DIR }}/bundle-metadata/THIRD_PARTY.json
+            ${{ env.BUILD_DIR }}/bundle-metadata/sbom.spdx.json

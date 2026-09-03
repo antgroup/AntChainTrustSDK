@@ -27,7 +27,10 @@ actrust_use_shared_pki(core_smoke_test)
 
 if(ACTRUST_TESTS_AWS_FLEET_AVAILABLE)
     actrust_add_test(NAME core_smoke_test COMMAND core_smoke_test)
-    set_tests_properties(core_smoke_test PROPERTIES LABELS "actrust;core;smoke")
+    set_tests_properties(
+        core_smoke_test
+        PROPERTIES LABELS "actrust;core;smoke;integration;aws;pki"
+    )
 else()
     message(
         STATUS
@@ -44,7 +47,9 @@ else()
     )
     set_tests_properties(
         core_smoke_test
-        PROPERTIES LABELS "actrust;core;smoke" SKIP_REGULAR_EXPRESSION "Skipped"
+        PROPERTIES
+            LABELS "actrust;core;smoke;integration;aws;pki"
+            SKIP_REGULAR_EXPRESSION "Skipped"
     )
 endif()
 
@@ -53,5 +58,23 @@ endif()
 # -----------------------------------------------------------------------------
 add_executable(core_unit_test "${CMAKE_CURRENT_LIST_DIR}/core_unit_test.c")
 target_link_libraries(core_unit_test PRIVATE unity core)
+target_include_directories(
+    core_unit_test
+    PRIVATE "${CMAKE_SOURCE_DIR}/source/components/kv/include"
+)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_definitions(
+        core_unit_test
+        PRIVATE ACTRUST_TEST_WRAP_CORE_KV=1
+    )
+    target_link_options(
+        core_unit_test
+        PRIVATE
+            "-Wl,--wrap=actrust_kv_open"
+            "-Wl,--wrap=actrust_kv_exists"
+            "-Wl,--wrap=actrust_kv_set"
+            "-Wl,--wrap=actrust_kv_close"
+    )
+endif()
 actrust_add_test(NAME core_unit_test COMMAND core_unit_test)
 set_tests_properties(core_unit_test PROPERTIES LABELS "actrust;core;unit")

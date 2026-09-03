@@ -124,6 +124,13 @@ config ACTRUST_STORAGE_FILE_PREFIX
     string "Storage file prefix"
     default "actrust_kv_"
 
+config ACTRUST_STORAGE_REGION_SIZE
+    int "Storage region size"
+    default 75000
+    help
+        Logical byte capacity reserved for each file-backed storage region.
+        The value must be large enough for the configured KV journal layout.
+
 endmenu
 
 endif
@@ -158,6 +165,13 @@ config ACTRUST_STORAGE_FILE_PREFIX
     string "Storage file prefix"
     default "actrust_kv_"
 
+config ACTRUST_STORAGE_REGION_SIZE
+    int "Storage region size"
+    default 75000
+    help
+        Logical byte capacity reserved for each file-backed storage region.
+        The value must be large enough for the configured KV journal layout.
+
 endmenu
 
 endif
@@ -175,6 +189,13 @@ config ACTRUST_STORAGE_BASE_DIR
 config ACTRUST_STORAGE_FILE_PREFIX
     string "Storage file prefix"
     default "actrust_kv_"
+
+config ACTRUST_STORAGE_REGION_SIZE
+    int "Storage region size"
+    default 75000
+    help
+        Logical byte capacity reserved for each file-backed storage region.
+        The value must be large enough for the configured KV journal layout.
 
 endmenu
 

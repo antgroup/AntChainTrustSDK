@@ -33,7 +33,10 @@ toolchain
 # =========================
 # Generated documentation
 # =========================
-docs/
+docs/*
+!docs/RELEASE_BRANCHING.md
+!docs/releases/
+!docs/releases/v1.1.0.md
 
 # =========================
 # Python

@@ -16,6 +16,7 @@
 
 /* Adapter */
 #include "adapter/network.h"
+#include "adapter/system.h"
 
 #define TEST_NET_ERR(reason)                                                   \
     ACTRUST_ERR(ACTRUST_ERR_MODULE_ADAPTER_NETWORK, (reason))
@@ -32,6 +33,17 @@ static test_ntp_peer_mode_t s_peer_mode;
 static uint8_t              s_request_tx[8];
 static uint16_t             s_server_port;
 static bool                 s_have_request;
+static uint32_t             s_dns_timeout;
+static uint32_t             s_send_timeout;
+static uint32_t             s_recv_timeout;
+static uint32_t             s_dns_calls;
+static uint32_t             s_send_calls;
+static uint32_t             s_recv_calls;
+static uint32_t             s_monotonic_delay_after_dns_ms;
+static uint32_t             s_monotonic_delay_after_send_ms;
+static bool                 s_block_dns;
+static actrust_sem_t        s_dns_entered;
+static actrust_sem_t        s_dns_release;
 static actrust_ntp_t        ntp;
 
 static void test_fill_sntp_response(uint8_t *buf, size_t len)
@@ -48,7 +60,19 @@ actrust_err_t actrust_net_dns_resolve(const char *host, char *ip, size_t ip_len,
                                       uint32_t timeout_ms)
 {
     (void) host;
-    (void) timeout_ms;
+
+    s_dns_timeout = timeout_ms;
+    s_dns_calls++;
+    if (s_block_dns) {
+        (void) actrust_sem_post(s_dns_entered);
+        actrust_err_t wait_err = actrust_sem_wait(s_dns_release, UINT32_MAX);
+        if (wait_err != ACTRUST_OK) {
+            return wait_err;
+        }
+    }
+    if (s_monotonic_delay_after_dns_ms > 0u) {
+        actrust_sleep_ms(s_monotonic_delay_after_dns_ms);
+    }
 
     if (ip == NULL || ip_len < sizeof(TEST_NTP_SERVER_IP)) {
         return TEST_NET_ERR(ACTRUST_ERR_BUF_TOO_SMALL);
@@ -78,7 +102,12 @@ actrust_err_t actrust_net_sendto(actrust_net_t net, const char *ip,
                                  uint32_t timeout_ms, size_t *sent_len)
 {
     (void) ip;
-    (void) timeout_ms;
+
+    s_send_timeout = timeout_ms;
+    s_send_calls++;
+    if (s_monotonic_delay_after_send_ms > 0u) {
+        actrust_sleep_ms(s_monotonic_delay_after_send_ms);
+    }
 
     if (net == NULL || buf == NULL || sent_len == NULL || len < 48u) {
         return TEST_NET_ERR(ACTRUST_ERR_INVALID_ARG);
@@ -95,7 +124,8 @@ actrust_err_t actrust_net_recvfrom(actrust_net_t net, char *ip, size_t ip_len,
                                    uint16_t *port, uint8_t *buf, size_t len,
                                    uint32_t timeout_ms, size_t *recvd_len)
 {
-    (void) timeout_ms;
+    s_recv_timeout = timeout_ms;
+    s_recv_calls++;
 
     if (net == NULL || buf == NULL || recvd_len == NULL || len < 48u ||
         !s_have_request) {
@@ -122,9 +152,20 @@ actrust_err_t actrust_net_recvfrom(actrust_net_t net, char *ip, size_t ip_len,
 
 void setUp(void)
 {
-    s_peer_mode    = TEST_NTP_PEER_MATCH;
-    s_server_port  = 0u;
-    s_have_request = false;
+    s_peer_mode                     = TEST_NTP_PEER_MATCH;
+    s_server_port                   = 0u;
+    s_have_request                  = false;
+    s_dns_timeout                   = 0u;
+    s_send_timeout                  = 0u;
+    s_recv_timeout                  = 0u;
+    s_dns_calls                     = 0u;
+    s_send_calls                    = 0u;
+    s_recv_calls                    = 0u;
+    s_monotonic_delay_after_dns_ms  = 0u;
+    s_monotonic_delay_after_send_ms = 0u;
+    s_block_dns                     = false;
+    s_dns_entered                   = NULL;
+    s_dns_release                   = NULL;
     memset(s_request_tx, 0, sizeof(s_request_tx));
     ntp = NULL;
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_ntp_init(&ntp));
@@ -135,6 +176,14 @@ void tearDown(void)
     if (ntp != NULL) {
         actrust_ntp_deinit(ntp);
         ntp = NULL;
+    }
+    if (s_dns_release != NULL) {
+        (void) actrust_sem_destroy(s_dns_release);
+        s_dns_release = NULL;
+    }
+    if (s_dns_entered != NULL) {
+        (void) actrust_sem_destroy(s_dns_entered);
+        s_dns_entered = NULL;
     }
 }
 
@@ -195,6 +244,123 @@ void test_sync_accepts_matching_sender(void)
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_ntp_get_last_offset_ms(ntp, &offset));
 }
 
+void test_sync_uses_one_timeout_budget(void)
+{
+    s_monotonic_delay_after_dns_ms  = 20u;
+    s_monotonic_delay_after_send_ms = 20u;
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_ntp_sync(ntp));
+    TEST_ASSERT_EQUAL_UINT32(1u, s_dns_calls);
+    TEST_ASSERT_EQUAL_UINT32(1u, s_send_calls);
+    TEST_ASSERT_EQUAL_UINT32(1u, s_recv_calls);
+    TEST_ASSERT_GREATER_THAN(s_send_timeout, s_dns_timeout);
+    TEST_ASSERT_GREATER_THAN(s_recv_timeout, s_send_timeout);
+}
+
+typedef struct {
+    actrust_ntp_t ntp;
+    actrust_err_t result;
+    actrust_sem_t returned;
+} ntp_worker_t;
+
+static void sync_worker(void *arg)
+{
+    ntp_worker_t *worker = (ntp_worker_t *) arg;
+    worker->result       = actrust_ntp_sync(worker->ntp);
+    (void) actrust_sem_post(worker->returned);
+}
+
+static void deinit_worker(void *arg)
+{
+    ntp_worker_t *worker = (ntp_worker_t *) arg;
+    worker->result       = actrust_ntp_deinit(worker->ntp);
+    (void) actrust_sem_post(worker->returned);
+}
+
+void test_sync_calls_are_serialized(void)
+{
+    actrust_task_t first_task  = NULL;
+    actrust_task_t second_task = NULL;
+    actrust_sem_t  returned    = NULL;
+    ntp_worker_t   first       = { .ntp = ntp, .result = ACTRUST_OK };
+    ntp_worker_t   second      = { .ntp = ntp, .result = ACTRUST_OK };
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_create(&s_dns_entered, 0u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_create(&s_dns_release, 0u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_create(&returned, 0u));
+    first.returned  = returned;
+    second.returned = returned;
+    s_block_dns     = true;
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_task_create(&first_task, "ntp_sync", sync_worker,
+                                          &first, 0u, 0u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_wait(s_dns_entered, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_task_create(&second_task, "ntp_sync", sync_worker,
+                                          &second, 0u, 0u));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_WOULD_BLOCK,
+                      ACTRUST_ERR_CODE(actrust_sem_wait(s_dns_entered, 0u)));
+
+    s_block_dns = false;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_post(s_dns_release));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_wait(returned, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_wait(returned, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_task_join(first_task, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_task_join(second_task, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, first.result);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, second.result);
+    TEST_ASSERT_EQUAL_UINT32(2u, s_dns_calls);
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_destroy(returned));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_destroy(s_dns_release));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_destroy(s_dns_entered));
+    s_dns_release = NULL;
+    s_dns_entered = NULL;
+}
+
+void test_deinit_waits_for_sync(void)
+{
+    actrust_task_t sync_task   = NULL;
+    actrust_task_t deinit_task = NULL;
+    actrust_sem_t  returned    = NULL;
+    ntp_worker_t   sync        = { .ntp = ntp, .result = ACTRUST_OK };
+    ntp_worker_t   deinit      = { .ntp = ntp, .result = ACTRUST_OK };
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_create(&s_dns_entered, 0u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_create(&s_dns_release, 0u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_create(&returned, 0u));
+    sync.returned   = returned;
+    deinit.returned = returned;
+    s_block_dns     = true;
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_task_create(&sync_task, "ntp_sync", sync_worker,
+                                          &sync, 0u, 0u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_wait(s_dns_entered, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_task_create(&deinit_task, "ntp_deinit",
+                                          deinit_worker, &deinit, 0u, 0u));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_WOULD_BLOCK,
+                      ACTRUST_ERR_CODE(actrust_sem_wait(returned, 0u)));
+
+    s_block_dns = false;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_post(s_dns_release));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_wait(returned, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_wait(returned, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_task_join(sync_task, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_task_join(deinit_task, 1000u));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, sync.result);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, deinit.result);
+    ntp = NULL;
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_destroy(returned));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_destroy(s_dns_release));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_sem_destroy(s_dns_entered));
+    s_dns_release = NULL;
+    s_dns_entered = NULL;
+}
+
 void test_sync_rejects_unexpected_sender_ip(void)
 {
     int64_t offset = 0;
@@ -231,6 +397,9 @@ int main(void)
     RUN_TEST(test_offset_null_args);
     RUN_TEST(test_now_null_args);
     RUN_TEST(test_sync_accepts_matching_sender);
+    RUN_TEST(test_sync_uses_one_timeout_budget);
+    RUN_TEST(test_sync_calls_are_serialized);
+    RUN_TEST(test_deinit_waits_for_sync);
     RUN_TEST(test_sync_rejects_unexpected_sender_ip);
     RUN_TEST(test_sync_rejects_unexpected_sender_port);
     return UNITY_END();

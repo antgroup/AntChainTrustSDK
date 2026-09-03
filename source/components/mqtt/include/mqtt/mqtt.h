@@ -73,6 +73,16 @@ typedef struct {
 
 /**
  * @brief Static client configuration supplied to @ref actrust_mqtt_init.
+ *
+ * The configuration structure is assigned when @ref actrust_mqtt_connect is
+ * called, but the strings and byte buffers it references are borrowed by the
+ * MQTT client. The caller must keep @p client_id, the transport host, the CA
+ * buffer, and the client certificate valid until disconnect and any reconnect
+ * activity have finished.
+ *
+ * The TLS @p crypto_ctx and @p client_key handles are borrowed. MQTT does not
+ * retain, close, or deinitialize them; they must remain valid through the TLS
+ * session, process, reconnect, disconnect, and deinitialization lifecycle.
  */
 typedef struct {
     const char                     *client_id; /**< MQTT client identifier. */
@@ -96,6 +106,12 @@ typedef struct {
 
 /**
  * @brief Callback invoked for inbound messages.
+ *
+ * The topic and payload pointers are borrowed views into coreMQTT storage and
+ * are valid only while this callback is executing. Copy them before retaining
+ * or queueing them. The callback runs synchronously on the task executing
+ * @ref actrust_mqtt_process. It is a transport-level callback; the Core API
+ * exposes only completion callbacks for its internal registration messages.
  *
  * @param[in] user_ctx User context configured in @ref actrust_mqtt_callbacks_t.
  * @param[in] message  Inbound MQTT message.
@@ -146,7 +162,11 @@ actrust_err_t actrust_mqtt_init(actrust_mqtt_t *out_mqtt);
  * If the process loop is still running after the client has left
  * CONNECTED/CONNECTING state, this function requests loop termination and
  * waits for @ref actrust_mqtt_process to return before releasing resources.
- *
+ * New operations must not race this call; the caller must stop other users of
+ * the client before deinitialization. A timeout returns without releasing the
+ * client resources. The caller owns and joins the upper-layer task that runs
+ * the process loop. Calling deinit from an active message callback is invalid
+ * and returns @c ACTRUST_ERR_BAD_STATE.
  * @param[in] mqtt Client handle.
  *
  * @retval ACTRUST_OK Deinitialization succeeded.
@@ -172,7 +192,10 @@ actrust_err_t actrust_mqtt_set_callbacks(
  * @brief Connect to the broker.
  *
  * @param[in] mqtt Client handle.
- * @param[in] config Client configuration.
+ * @param[in] config Client configuration. String and certificate buffers remain
+ *                   borrowed until disconnect and reconnect activity finish;
+ *                   TLS crypto/key handles remain borrowed and must outlive the
+ *                   MQTT instance.
  *
  * @retval ACTRUST_OK Connected successfully.
  * @retval ACTRUST_ERR_INVALID_ARG @c mqtt is NULL.
@@ -203,10 +226,18 @@ actrust_err_t actrust_mqtt_disconnect(actrust_mqtt_t mqtt);
 /**
  * @brief Publish a message.
  *
+ * The topic and payload are copied into the asynchronous command before this
+ * function returns. The caller-supplied @p topic_len must match the topic bytes
+ * and both fields must fit their configured limits. Only QoS 0 and QoS 1 are
+ * supported. The current implementation maps an unsupported enum value to QoS
+ * 0; callers should pass only the declared QoS values. A successful return
+ * means the command was accepted by the local transmit queue, not that the
+ * broker acknowledged the message.
+ *
  * @param[in] mqtt Client handle.
  * @param[in] message Publish message.
  *
- * @retval ACTRUST_OK Message published successfully (in the transmit queue).
+ * @retval ACTRUST_OK Message command was accepted and queued.
  * @retval ACTRUST_ERR_BAD_STATE Client is not connected.
  * @retval ACTRUST_ERR_INVALID_ARG Invalid arguments.
  * @retval ACTRUST_ERR_QUEUE_FULL Internal transmit queue is full.
@@ -220,12 +251,19 @@ actrust_err_t actrust_mqtt_publish(actrust_mqtt_t                mqtt,
 /**
  * @brief Subscribe to a topic.
  *
+ * The topic is copied into the local subscription record when the command is
+ * accepted and is replayed after a later reconnect. The broker's SUBACK result
+ * is reported only through logging; a rejected SUBACK does not remove the local
+ * record, so applications must handle broker-side rejection before relying on
+ * the subscription. The topic must be non-empty and shorter than the
+ * configured topic limit.
+ *
  * @param[in] mqtt Client handle.
  * @param[in] topic Topic name.
  *
- * @retval ACTRUST_OK Subscription request accepted.
+ * @retval ACTRUST_OK Subscription command was accepted and queued.
  * @retval ACTRUST_ERR_BAD_STATE Client is not connected.
- * @retval ACTRUST_ERR_INVALID_ARG Invalid arguments.
+ * @retval ACTRUST_ERR_INVALID_ARG Invalid arguments or topic length.
  * @retval ACTRUST_ERR_NO_MEM Memory allocation failed.
  */
 actrust_err_t actrust_mqtt_subscribe(actrust_mqtt_t mqtt, const char *topic);
@@ -233,12 +271,16 @@ actrust_err_t actrust_mqtt_subscribe(actrust_mqtt_t mqtt, const char *topic);
 /**
  * @brief Unsubscribe from a topic.
  *
+ * The local subscription record is removed when the command is accepted; the
+ * command is then sent to the broker if the client is connected. The topic must
+ * be non-empty and shorter than the configured topic limit.
+ *
  * @param[in] mqtt Client handle.
  * @param[in] topic Topic name.
  *
- * @retval ACTRUST_OK Unsubscription request accepted.
+ * @retval ACTRUST_OK Unsubscription command was accepted and queued.
  * @retval ACTRUST_ERR_BAD_STATE Client is not connected.
- * @retval ACTRUST_ERR_INVALID_ARG Invalid arguments.
+ * @retval ACTRUST_ERR_INVALID_ARG Invalid arguments or topic length.
  * @retval ACTRUST_ERR_NO_MEM Memory allocation failed.
  */
 actrust_err_t actrust_mqtt_unsubscribe(actrust_mqtt_t mqtt, const char *topic);

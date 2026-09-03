@@ -69,6 +69,31 @@ typedef uint32_t actrust_sec_slot_t;
 #define ACTRUST_SEC_SLOT_CERT(n)                                               \
     ((actrust_sec_slot_t) (ACTRUST_SEC_SLOT_CERT_BASE + (n)))
 
+/** @brief Security service capabilities exposed by the active adapter. */
+typedef uint32_t actrust_sec_capabilities_t;
+
+/** @brief Adapter can provide random bytes through actrust_sec_random(). */
+#define ACTRUST_SEC_CAP_RANDOM ((actrust_sec_capabilities_t) 1u << 0)
+/** @brief Adapter can create, retain, delete, and use secure keys. */
+#define ACTRUST_SEC_CAP_KEY_MGMT ((actrust_sec_capabilities_t) 1u << 1)
+/** @brief Adapter can perform ECDSA operations with secure keys. */
+#define ACTRUST_SEC_CAP_ECDSA ((actrust_sec_capabilities_t) 1u << 2)
+/** @brief Adapter can perform hash operations in the secure environment. */
+#define ACTRUST_SEC_CAP_HASH ((actrust_sec_capabilities_t) 1u << 3)
+/** @brief Adapter can perform AES operations with secure keys. */
+#define ACTRUST_SEC_CAP_AES ((actrust_sec_capabilities_t) 1u << 4)
+
+/**
+ * @brief Return the security capabilities actually implemented by the adapter.
+ *
+ * The result describes callable adapter services, not merely a build-time
+ * configuration claim. In particular, file-backed adapters do not report
+ * secure key-management capabilities.
+ *
+ * @return Bitwise OR of @ref actrust_sec_capabilities_t values.
+ */
+actrust_sec_capabilities_t actrust_sec_get_capabilities(void);
+
 /** @brief Key type for secure-element key generation. */
 typedef enum {
     ACTRUST_SEC_KEY_EC_P256      = 1, /**< NIST P-256 EC key pair */

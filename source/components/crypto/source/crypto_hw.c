@@ -254,6 +254,16 @@ static actrust_err_t hw_crypto_key_destroy(actrust_crypto_ctx_t ctx,
     return actrust_sec_key_delete(keyid_to_slotid(key_id));
 }
 
+static actrust_err_t hw_crypto_key_migrate(actrust_crypto_ctx_t ctx,
+                                           uint32_t             source_id,
+                                           uint32_t             target_id)
+{
+    (void) ctx;
+    (void) source_id;
+    (void) target_id;
+    return CRYPTO_ERR(ACTRUST_ERR_UNSUPPORTED);
+}
+
 static actrust_err_t hw_crypto_key_import(actrust_crypto_ctx_t    ctx,
                                           uint32_t                key_id,
                                           actrust_crypto_format_t format,
@@ -656,6 +666,7 @@ const crypto_backend_ops_t hw_crypto_ops = {
     .key_generate      = hw_crypto_key_generate,
     .key_import        = hw_crypto_key_import,
     .key_destroy       = hw_crypto_key_destroy,
+    .key_migrate       = hw_crypto_key_migrate,
     .key_export_public = hw_crypto_key_export_public,
     .ecdsa_sign        = hw_crypto_ecdsa_sign,
     .ecdsa_verify      = hw_crypto_ecdsa_verify,

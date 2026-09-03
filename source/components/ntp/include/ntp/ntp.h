@@ -60,7 +60,9 @@ actrust_err_t actrust_ntp_init(actrust_ntp_t *out);
 /**
  * @brief De-initialise an NTP instance and release resources
  *
- * After this call the handle is invalid and must not be used.
+ * Deinit waits for calls that entered before closing to finish. Once the owner
+ * starts deinit, no thread may begin another API call with this raw handle.
+ * After this call succeeds the handle is invalid and must not be used.
  *
  * @param[in] n  NTP handle returned by @ref actrust_ntp_init
  *
@@ -75,8 +77,13 @@ actrust_err_t actrust_ntp_deinit(actrust_ntp_t n);
  * Sends an NTP request to the configured server and, on success, updates
  * the internal clock offset state.
  *
- * This function blocks until the exchange completes or times out.
- * It is intended to be called from an upper-layer periodic task.
+ * Synchronisation calls and getters on one handle are serialized. A failed sync
+ * leaves the last successfully committed offset unchanged. The configured
+ * timeout is one monotonic budget shared by DNS resolution, UDP send, and
+ * response receive.
+ *
+ * This function blocks until the exchange completes or the total budget
+ * expires. It is intended to be called from an upper-layer periodic task.
  *
  * @param[in] n  NTP handle
  *
@@ -116,6 +123,9 @@ actrust_err_t actrust_ntp_get_last_offset_ms(actrust_ntp_t n,
  * @return ACTRUST_OK on success
  * @return Error with @c ACTRUST_ERR_INVALID_ARG if any argument is NULL
  * @return Error with @c ACTRUST_ERR_NOT_READY if no successful sync yet
+ * @return Error with @c ACTRUST_ERR_BAD_STATE if applying the last offset would
+ *         underflow or overflow the unsigned timestamp range
+ * @return Error with @c ACTRUST_ERR_HW_FAILURE if the wall clock cannot be read
  */
 actrust_err_t actrust_ntp_now_ms(actrust_ntp_t n, uint64_t *out_now_ms);
 

@@ -37,7 +37,12 @@ typedef struct actrust_cloud_ctx *actrust_cloud_t;
  * Enumerations
  * ======================================================================== */
 
-/** @brief Cloud provider identifier. */
+/**
+ * @brief Cloud provider identifier.
+ *
+ * AWS IoT Core is the only provider implemented by this SDK today. Additional
+ * providers remain an extension point and are not implied by this enum.
+ */
 typedef enum {
     ACTRUST_CLOUD_PROVIDER_AWS = 1, /**< AWS IoT Core provider. */
 } actrust_cloud_provider_t;
@@ -56,6 +61,7 @@ typedef enum {
 #define ACTRUST_CLOUD_CLAIM_CERT_ID   ACTRUST_CRYPTO_CERT_ID_X509_0
 #define ACTRUST_CLOUD_RUNTIME_KEY_ID  ACTRUST_CRYPTO_KEY_ID_EC_1
 #define ACTRUST_CLOUD_RUNTIME_CERT_ID ACTRUST_CRYPTO_CERT_ID_X509_1
+#define ACTRUST_CLOUD_SIGNING_KEY_ID  ACTRUST_CRYPTO_KEY_ID_EC_2
 
 /* ========================================================================
  * Message Types
@@ -63,6 +69,10 @@ typedef enum {
 
 /**
  * @brief Cloud downlink message.
+ *
+ * The current AWS provider places internal registration messages in this queue.
+ * The payload is owned by the queue message and is valid until that message is
+ * removed by the consumer.
  */
 typedef struct {
     uint8_t
@@ -94,6 +104,11 @@ actrust_err_t actrust_cloud_init(actrust_cloud_provider_t provider,
 /**
  * @brief Deinitialize cloud context and release all resources.
  *
+ * The caller must stop and join every task that consumes the downlink queue
+ * returned by @ref actrust_cloud_init before calling this function. Queue
+ * destruction does not own or join external consumer tasks. If provider or
+ * queue teardown fails, the cloud handle remains owned by the caller and the
+ * caller must follow the returned handle/queue ownership state before retrying.
  * @param[in] cloud Cloud handle.
  *
  * @retval ACTRUST_OK Deinitialization succeeded.
@@ -127,6 +142,11 @@ actrust_err_t actrust_cloud_disconnect(actrust_cloud_t cloud);
 /**
  * @brief Send business uplink data.
  *
+ * The current AWS implementation requires @p payload to be a complete JSON
+ * object encoded as non-NUL bytes. It wraps that object in an AWS IoT Shadow
+ * @c state.reported update and submits it through MQTT at QoS 0. A successful
+ * return means the update was accepted by the local MQTT transmit queue, not
+ * that AWS, a business service, or a blockchain endpoint acknowledged it.
  * @param[in] cloud Cloud handle.
  * @param[in] payload Business payload.
  * @param[in] payload_len Payload length.
@@ -145,6 +165,11 @@ actrust_err_t actrust_cloud_send_data(actrust_cloud_t cloud,
 
 /**
  * @brief Send a registration uplink message.
+ *
+ * Registration traffic is the SDK's provider-specific challenge-response
+ * protocol and is separate from AWS Fleet Provisioning, which establishes the
+ * runtime identity. The payload is borrowed for the duration of this call; the
+ * MQTT layer copies it into its asynchronous command before returning.
  *
  * Registration traffic uses provider-specific register topics and does not use
  * the business data path.

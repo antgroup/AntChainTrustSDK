@@ -65,6 +65,8 @@
 #define CORE_KV_KEY_REGISTERED                                                 \
     "registered" /*!< KV key for registration status */
 
+#define CORE_SIGNING_KEY_ID ACTRUST_CLOUD_SIGNING_KEY_ID
+
 /* Downlink task configuration */
 #define CORE_DOWNLINK_STACK_SIZE      4096u /*!< Stack size for downlink task */
 #define CORE_DOWNLINK_PRIORITY        5u    /*!< Priority for downlink task */
@@ -342,7 +344,7 @@ static actrust_err_t core_downlink_start(actrust_core_ctx_t *ctx)
 
 static actrust_err_t core_downlink_stop(actrust_core_ctx_t *ctx)
 {
-    if (ctx->downlink_stop_sem != NULL) {
+    if (ctx->downlink_stop_sem != NULL && ctx->downlink_task != NULL) {
         (void) actrust_sem_post(ctx->downlink_stop_sem);
     }
     if (ctx->downlink_task != NULL) {
@@ -355,7 +357,12 @@ static actrust_err_t core_downlink_stop(actrust_core_ctx_t *ctx)
         ctx->downlink_task = NULL;
     }
     if (ctx->downlink_stop_sem != NULL) {
-        (void) actrust_sem_destroy(ctx->downlink_stop_sem);
+        actrust_err_t sem_err = actrust_sem_destroy(ctx->downlink_stop_sem);
+        if (ACTRUST_IS_ERR(sem_err)) {
+            LOG_WARN("downlink stop semaphore destroy failed: 0x%08" PRIx32,
+                     sem_err);
+            return sem_err;
+        }
         ctx->downlink_stop_sem = NULL;
     }
 
@@ -414,7 +421,7 @@ static actrust_err_t core_ntp_start(actrust_core_ctx_t *ctx)
 
 static actrust_err_t core_ntp_stop(actrust_core_ctx_t *ctx)
 {
-    if (ctx->ntp_stop_sem != NULL) {
+    if (ctx->ntp_stop_sem != NULL && ctx->ntp_task != NULL) {
         (void) actrust_sem_post(ctx->ntp_stop_sem);
     }
     if (ctx->ntp_task != NULL) {
@@ -427,7 +434,12 @@ static actrust_err_t core_ntp_stop(actrust_core_ctx_t *ctx)
         ctx->ntp_task = NULL;
     }
     if (ctx->ntp_stop_sem != NULL) {
-        (void) actrust_sem_destroy(ctx->ntp_stop_sem);
+        actrust_err_t sem_err = actrust_sem_destroy(ctx->ntp_stop_sem);
+        if (ACTRUST_IS_ERR(sem_err)) {
+            LOG_WARN("ntp stop semaphore destroy failed: 0x%08" PRIx32,
+                     sem_err);
+            return sem_err;
+        }
         ctx->ntp_stop_sem = NULL;
     }
 
@@ -477,10 +489,40 @@ static actrust_err_t core_store_claim_credentials(actrust_core_ctx_t  *ctx,
     return ACTRUST_OK;
 }
 
+static actrust_err_t core_prepare_signing_key(actrust_core_ctx_t *ctx,
+                                              bool local_registered)
+{
+    actrust_err_t err = actrust_crypto_key_open(
+        ctx->crypto, CORE_SIGNING_KEY_ID, &ctx->sign_key);
+    if (err == ACTRUST_OK) {
+        return ACTRUST_OK;
+    }
+    if (!local_registered || ACTRUST_ERR_CODE(err) != ACTRUST_ERR_NO_RESOURCE) {
+        if (!local_registered) {
+            LOG_DEBUG("no existing signing key (first boot): 0x%08" PRIx32,
+                      err);
+            return ACTRUST_OK;
+        }
+        return err;
+    }
+
+    /* Older releases used EC_0 for the device signer. Preserve that key while
+     * copying it into the dedicated signer slot; claim credentials remain in
+     * their own slot and are never deleted by this migration. */
+    err = actrust_crypto_key_migrate(ctx->crypto, ACTRUST_CRYPTO_KEY_ID_EC_0,
+                                     CORE_SIGNING_KEY_ID);
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+    return actrust_crypto_key_open(ctx->crypto, CORE_SIGNING_KEY_ID,
+                                   &ctx->sign_key);
+}
+
 actrust_err_t core_ops_init(actrust_job_t *job)
 {
     actrust_core_ctx_t *ctx = core_get_ctx();
     actrust_err_t       err;
+    bool                local_registered = false;
 
     /* actrust_kv_init is a global one-shot initialiser with no matching
      * deinit; on failure there is nothing to roll back. */
@@ -496,6 +538,15 @@ actrust_err_t core_ops_init(actrust_job_t *job)
         return err;
     }
 
+    err = core_read_local_registered(&local_registered);
+    if (ACTRUST_IS_ERR(err) &&
+        ACTRUST_ERR_CODE(err) != ACTRUST_ERR_NO_RESOURCE) {
+        goto fail_crypto;
+    }
+    if (ACTRUST_ERR_CODE(err) == ACTRUST_ERR_NO_RESOURCE) {
+        local_registered = false;
+    }
+
     err = actrust_ntp_init(&ctx->ntp);
     if (ACTRUST_IS_ERR(err)) {
         goto fail_crypto;
@@ -507,18 +558,14 @@ actrust_err_t core_ops_init(actrust_job_t *job)
         goto fail_ntp;
     }
 
-    err = core_store_claim_credentials(ctx, job);
+    err = core_prepare_signing_key(ctx, local_registered);
     if (ACTRUST_IS_ERR(err)) {
         goto fail_cloud;
     }
 
-    /* Try to open an existing signing key (succeeds if already registered).
-     * A missing key on first boot is expected, so we only log and continue. */
-    actrust_err_t key_err = actrust_crypto_key_open(
-        ctx->crypto, ACTRUST_CRYPTO_KEY_ID_EC_0, &ctx->sign_key);
-    if (ACTRUST_IS_ERR(key_err)) {
-        LOG_DEBUG("no existing signing key (first boot): 0x%08" PRIx32,
-                  key_err);
+    err = core_store_claim_credentials(ctx, job);
+    if (ACTRUST_IS_ERR(err)) {
+        goto fail_cloud;
     }
 
     core_set_state(ACTRUST_CORE_READY);
@@ -548,40 +595,55 @@ actrust_err_t core_ops_deinit(actrust_job_t *job)
     actrust_err_t err = core_ntp_stop(ctx);
     if (ACTRUST_IS_ERR(err)) {
         LOG_WARN("ntp stop during deinit failed: 0x%08" PRIx32, err);
+        return err;
     }
 
-    actrust_err_t cleanup_err = core_downlink_stop(ctx);
-    if (ACTRUST_IS_ERR(cleanup_err)) {
-        LOG_WARN("downlink stop during deinit failed: 0x%08" PRIx32,
-                 cleanup_err);
-        if (ACTRUST_IS_OK(err)) {
-            err = cleanup_err;
-        }
+    err = core_downlink_stop(ctx);
+    if (ACTRUST_IS_ERR(err)) {
+        LOG_WARN("downlink stop during deinit failed: 0x%08" PRIx32, err);
+        return err;
     }
 
     if (ctx->sign_key != NULL) {
-        (void) actrust_crypto_key_close(ctx->crypto, &ctx->sign_key);
-        ctx->sign_key = NULL;
+        err = actrust_crypto_key_close(ctx->crypto, &ctx->sign_key);
+        if (ACTRUST_IS_ERR(err)) {
+            return err;
+        }
     }
 
-    (void) actrust_cloud_deinit(ctx->cloud);
-    ctx->cloud          = NULL;
-    ctx->downlink_queue = NULL;
+    if (ctx->cloud != NULL) {
+        err = actrust_cloud_deinit(ctx->cloud);
+        if (ACTRUST_IS_ERR(err)) {
+            LOG_WARN("cloud deinit during deinit failed: 0x%08" PRIx32, err);
+            return err;
+        }
+        ctx->cloud          = NULL;
+        ctx->downlink_queue = NULL;
+    }
 
-    (void) actrust_ntp_deinit(ctx->ntp);
-    ctx->ntp = NULL;
+    if (ctx->ntp != NULL) {
+        err = actrust_ntp_deinit(ctx->ntp);
+        if (ACTRUST_IS_ERR(err)) {
+            return err;
+        }
+        ctx->ntp = NULL;
+    }
 
-    (void) actrust_crypto_deinit(&ctx->crypto);
-    ctx->crypto = NULL;
+    if (ctx->crypto != NULL) {
+        err = actrust_crypto_deinit(&ctx->crypto);
+        if (ACTRUST_IS_ERR(err)) {
+            return err;
+        }
+    }
 
-    return err;
+    return ACTRUST_OK;
 }
 
 /* ========================================================================
  * Connect / Disconnect
  * ======================================================================== */
 
-static actrust_err_t core_read_local_registered(bool *out_registered)
+actrust_err_t core_read_local_registered(bool *out_registered)
 {
     if (out_registered == NULL) {
         return CORE_ERR(ACTRUST_ERR_INVALID_ARG);
@@ -594,23 +656,25 @@ static actrust_err_t core_read_local_registered(bool *out_registered)
         actrust_kv_open(CORE_KV_NAMESPACE, sizeof(CORE_KV_NAMESPACE) - 1u, &kv);
     if (ACTRUST_IS_ERR(err)) {
         LOG_WARN(
-            "kv open failed, treating device as unregistered: 0x%08" PRIx32,
+            "kv open failed while reading registration status: 0x%08" PRIx32,
             err);
-        return ACTRUST_OK;
+        return err;
     }
 
     err =
         actrust_kv_exists(kv, CORE_KV_KEY_REGISTERED,
                           sizeof(CORE_KV_KEY_REGISTERED) - 1u, out_registered);
     if (ACTRUST_IS_ERR(err)) {
-        LOG_WARN("kv exists failed, treating device as unregistered: "
+        LOG_WARN("kv exists failed while reading registration status: "
                  "0x%08" PRIx32,
                  err);
-        *out_registered = false;
     }
 
-    (void) actrust_kv_close(kv);
-    return ACTRUST_OK;
+    actrust_err_t close_err = actrust_kv_close(kv);
+    if (ACTRUST_IS_OK(err) && ACTRUST_IS_ERR(close_err)) {
+        err = close_err;
+    }
+    return err;
 }
 
 static actrust_err_t core_persist_registered(void)
@@ -622,7 +686,7 @@ static actrust_err_t core_persist_registered(void)
         LOG_WARN(
             "failed to open kv namespace for registration status: 0x%08" PRIx32,
             err);
-        return ACTRUST_OK;
+        return err;
     }
 
     err = actrust_kv_set(kv, CORE_KV_KEY_REGISTERED,
@@ -631,7 +695,21 @@ static actrust_err_t core_persist_registered(void)
         LOG_WARN("failed to persist registration status: 0x%08" PRIx32, err);
     }
 
-    (void) actrust_kv_close(kv);
+    actrust_err_t close_err = actrust_kv_close(kv);
+    if (ACTRUST_IS_OK(err) && ACTRUST_IS_ERR(close_err)) {
+        err = close_err;
+    }
+    return err;
+}
+
+actrust_err_t core_commit_registered(void)
+{
+    actrust_err_t err = core_persist_registered();
+    if (ACTRUST_IS_ERR(err)) {
+        return err;
+    }
+
+    core_set_state(ACTRUST_CORE_REGISTERED);
     return ACTRUST_OK;
 }
 
@@ -665,10 +743,13 @@ actrust_err_t core_ops_connect(actrust_job_t *job)
 
     if (local_registered && ctx->sign_key != NULL) {
         core_set_state(ACTRUST_CORE_REGISTERED);
+    } else if (local_registered) {
+        /* EC_0 is the claim/bootstrap key in the separated role model. Do not
+         * reuse or destroy it when an old device-signing key is unavailable. */
+        LOG_ERROR("registered marker exists without device signing key");
+        err = CORE_ERR(ACTRUST_ERR_UNSUPPORTED);
+        goto fail;
     } else {
-        if (local_registered && ctx->sign_key == NULL) {
-            LOG_WARN("local registration marker exists without signing key");
-        }
         core_set_state(ACTRUST_CORE_UNREGISTERED);
     }
 
@@ -919,7 +1000,7 @@ static actrust_err_t core_register_make_keypair(actrust_core_ctx_t *ctx,
                                                 size_t pubkey_hex_cap)
 {
     actrust_err_t err = actrust_crypto_key_generate(
-        ctx->crypto, ACTRUST_CRYPTO_KEY_ID_EC_0, &ctx->sign_key);
+        ctx->crypto, CORE_SIGNING_KEY_ID, &ctx->sign_key);
     if (ACTRUST_IS_ERR(err)) {
         return err;
     }
@@ -1150,8 +1231,7 @@ out:
     if (ACTRUST_IS_ERR(err)) {
         (void) actrust_crypto_key_close(ctx->crypto, &ctx->sign_key);
         ctx->sign_key = NULL;
-        (void) actrust_crypto_key_destroy(ctx->crypto,
-                                          ACTRUST_CRYPTO_KEY_ID_EC_0);
+        (void) actrust_crypto_key_destroy(ctx->crypto, CORE_SIGNING_KEY_ID);
     }
     core_lock();
     ctx->reg.in_progress    = false;
@@ -1191,13 +1271,7 @@ actrust_err_t core_ops_register(actrust_job_t *job)
         return err;
     }
 
-    err = core_persist_registered();
-    if (ACTRUST_IS_ERR(err)) {
-        return err;
-    }
-
-    core_set_state(ACTRUST_CORE_REGISTERED);
-    return ACTRUST_OK;
+    return core_commit_registered();
 }
 
 /* ========================================================================

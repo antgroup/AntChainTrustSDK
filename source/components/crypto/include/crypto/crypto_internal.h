@@ -16,6 +16,7 @@
 /* C standard */
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 /* Third-party */
 #include <mbedtls/pk.h>
@@ -56,6 +57,9 @@ typedef struct {
     actrust_crypto_key_type_t type;
     actrust_crypto_backend_t  backend;
     uint8_t                   slot_index;
+    bool                      requires_key_mgmt;
+    bool                      requires_ecdsa;
+    bool                      requires_aes;
     union {
         actrust_crypto_ec_curve_t curve;
         size_t                    key_bits;
@@ -119,6 +123,9 @@ typedef struct {
                                 actrust_crypto_key_t *out_key);
 
     actrust_err_t (*key_destroy)(actrust_crypto_ctx_t ctx, uint32_t key_id);
+
+    actrust_err_t (*key_migrate)(actrust_crypto_ctx_t ctx, uint32_t source_id,
+                                 uint32_t target_id);
 
     actrust_err_t (*key_export_public)(actrust_crypto_ctx_t ctx,
                                        actrust_crypto_key_t key, uint8_t *out,

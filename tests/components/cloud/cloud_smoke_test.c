@@ -124,15 +124,24 @@ void test_cloud_main_flow(void)
     }
 
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_cloud_disconnect(cloud));
+    g_cloud_test_downlink_running = false;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_task_join(downlink_task, 1000u));
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_cloud_deinit(cloud));
     cloud = NULL;
-
-    g_cloud_test_downlink_running = false;
 }
 
 int main(void)
 {
-    (void) actrust_log_init();
+    actrust_err_t err = actrust_lifecycle_lock();
+    if (err != ACTRUST_OK) {
+        return 1;
+    }
+
+    err                  = actrust_log_init();
+    actrust_err_t unlock = actrust_lifecycle_unlock();
+    if (err != ACTRUST_OK || unlock != ACTRUST_OK) {
+        return 1;
+    }
 
     UNITY_BEGIN();
     RUN_TEST(test_prepare_environment);

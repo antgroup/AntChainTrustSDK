@@ -18,28 +18,62 @@
 #define TEST_STACK_SIZE 8192
 #define TEST_PRIORITY   1
 
-static int s_log_info  = 0;
-static int s_log_debug = 0;
-static int s_log_warn  = 0;
-static int s_log_error = 0;
+static int             s_log_info      = 0;
+static int             s_log_debug     = 0;
+static int             s_log_warn      = 0;
+static int             s_log_error     = 0;
+static actrust_mutex_t s_counter_mutex = NULL;
+
+static actrust_err_t lifecycle_log_init(void)
+{
+    actrust_err_t err = actrust_lifecycle_lock();
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+
+    err                  = actrust_log_init();
+    actrust_err_t unlock = actrust_lifecycle_unlock();
+    return err != ACTRUST_OK ? err : unlock;
+}
+
+static actrust_err_t lifecycle_log_deinit(void)
+{
+    actrust_err_t err = actrust_lifecycle_lock();
+    if (err != ACTRUST_OK) {
+        return err;
+    }
+
+    err                  = actrust_log_deinit();
+    actrust_err_t unlock = actrust_lifecycle_unlock();
+    return err != ACTRUST_OK ? err : unlock;
+}
+
+static int next_counter(int *counter)
+{
+    int value = 0;
+    (void) actrust_mutex_lock(s_counter_mutex);
+    value = (*counter)++;
+    (void) actrust_mutex_unlock(s_counter_mutex);
+    return value;
+}
 
 static void log_task_entry(void *arg)
 {
     const int task_id = (int) (intptr_t) arg;
 
-    LOG_INFO("[%d] Task %d started", s_log_info++, task_id);
+    LOG_INFO("[%d] Task %d started", next_counter(&s_log_info), task_id);
     actrust_sleep_ms(10);
 
-    LOG_DEBUG("[%d] Task %d debug message with value: %d", s_log_debug++,
-              task_id, task_id * 100);
+    LOG_DEBUG("[%d] Task %d debug message with value: %d",
+              next_counter(&s_log_debug), task_id, task_id * 100);
     actrust_sleep_ms(10);
 
-    LOG_WARN("[%d] Task %d warning: operation may be slow", s_log_warn++,
-             task_id);
+    LOG_WARN("[%d] Task %d warning: operation may be slow",
+             next_counter(&s_log_warn), task_id);
     actrust_sleep_ms(10);
 
-    LOG_ERROR("[%d] Task %d encountered simulated error", s_log_error++,
-              task_id);
+    LOG_ERROR("[%d] Task %d encountered simulated error",
+              next_counter(&s_log_error), task_id);
     actrust_sleep_ms(10);
 
     LOG_INFO("Task %d completed", task_id);
@@ -51,15 +85,20 @@ void setUp(void)
     s_log_debug = 0;
     s_log_warn  = 0;
     s_log_error = 0;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mutex_create(&s_counter_mutex));
 }
 
 void tearDown(void)
 {
+    if (s_counter_mutex != NULL) {
+        TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_mutex_destroy(s_counter_mutex));
+        s_counter_mutex = NULL;
+    }
 }
 
 void test_log_init(void)
 {
-    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_log_init());
+    TEST_ASSERT_EQUAL(ACTRUST_OK, lifecycle_log_init());
 }
 
 void test_basic_logging(void)
@@ -93,7 +132,9 @@ void test_concurrent_logging(void)
                                           TEST_STACK_SIZE, TEST_PRIORITY));
     }
 
-    actrust_sleep_ms(300);
+    for (int i = 0; i < TEST_TASK_COUNT; i++) {
+        TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_task_join(tasks[i], 1000u));
+    }
 
 #if ACTRUST_LOG_COMPILED_LEVEL >= ACTRUST_LOG_LEVEL_INFO_VALUE
     TEST_ASSERT_EQUAL(TEST_TASK_COUNT, s_log_info);
@@ -122,7 +163,7 @@ void test_concurrent_logging(void)
 
 void test_log_deinit(void)
 {
-    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_log_deinit());
+    TEST_ASSERT_EQUAL(ACTRUST_OK, lifecycle_log_deinit());
 }
 
 int main(void)

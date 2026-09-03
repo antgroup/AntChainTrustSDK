@@ -1,4 +1,27 @@
 # SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
-# No additional configuration options.
+choice ACTRUST_CRYPTO_KEY_PROFILE
+    prompt "Persistent private-key profile"
+    default ACTRUST_CRYPTO_KEY_PROFILE_DEVELOPMENT
+    help
+        Select whether persistent private keys may use the software backend or
+        must remain non-exportable in a platform TEE / secure element.
+
+config ACTRUST_CRYPTO_KEY_PROFILE_DEVELOPMENT
+    bool "Development software keys"
+    help
+        Permit software-generated private keys serialized through the adapter
+        secure store. This profile is for development and reference platforms;
+        it does not provide non-exportable private-key storage.
+
+config ACTRUST_CRYPTO_KEY_PROFILE_PRODUCTION
+    bool "Strict production hardware keys"
+    depends on ACTRUST_SEC_HW_KEY_MGMT && ACTRUST_SEC_HW_ECDSA && ACTRUST_SEC_HW_AES
+    help
+        Require persistent private keys to use the hardware backend. Crypto
+        initialization rejects adapters whose runtime capabilities do not match
+        the configured hardware requirements. No hardware-to-software fallback
+        is performed.
+
+endchoice

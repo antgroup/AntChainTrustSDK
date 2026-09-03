@@ -99,26 +99,22 @@ typedef enum {
 /**
  * @brief Initialize the logging subsystem
  *
- * This function must be called before any logging operations.
- * It initializes internal mutex for thread safety.
- *
  * @return ACTRUST_OK on success
  * @return Error code from actrust_mutex_create() if mutex creation fails
  *
- * @note This function is idempotent - calling it multiple times is safe
+ * @note Component lifecycle is managed by Core. The caller must hold the
+ *       permanent lifecycle gate.
  */
 actrust_err_t actrust_log_init(void);
 
 /**
- * @brief Deinitialize the logging subsystem and free resources
+ * @brief Deinitialize the logging subsystem
  *
  * @return ACTRUST_OK on success
- * @return ACTRUST_ERR(ACTRUST_ERR_MODULE_COMPONENTS_LOG, ACTRUST_ERR_NOT_READY)
- *         if not initialized
- * @return Error code from actrust_mutex_destroy() if mutex destruction fails
+ * @return Error code if teardown cannot complete
  *
- * @note After calling this function, actrust_log_init() must be called again
- *       before using any logging functions
+ * @note Component lifecycle is managed by Core. The caller must hold the
+ *       permanent lifecycle gate; the function returns with the gate held.
  */
 actrust_err_t actrust_log_deinit(void);
 
@@ -149,6 +145,8 @@ actrust_err_t actrust_log_deinit(void);
  * @note Messages are truncated if they exceed ACTRUST_LOG_LINE_MAX
  * @note This function automatically appends a newline if not present
  * @note NULL or empty format strings are handled gracefully
+ * @note A write admitted before deinitialization begins remains valid until it
+ *       returns; writes started after closing begins are rejected.
  */
 actrust_err_t actrust_log_write(actrust_log_level_t level, const char *file,
                                 int line, const char *func, const char *fmt,

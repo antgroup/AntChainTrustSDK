@@ -92,13 +92,14 @@ typedef enum {
 /** @brief Registered key identifiers (type defined in the key descriptor
  * table). */
 typedef enum {
-    ACTRUST_CRYPTO_KEY_ID_EC_0  = 0x1000, /**< EC key slot 0 (P-256) */
-    ACTRUST_CRYPTO_KEY_ID_EC_1  = 0x1001, /**< EC key slot 1 (P-256) */
+    ACTRUST_CRYPTO_KEY_ID_EC_0  = 0x1000, /**< Legacy claim/signing slot */
+    ACTRUST_CRYPTO_KEY_ID_EC_1  = 0x1001, /**< Runtime TLS EC key */
     ACTRUST_CRYPTO_KEY_ID_AES_0 = 0x1002, /**< AES key slot 0 (256-bit) */
+    ACTRUST_CRYPTO_KEY_ID_EC_2  = 0x1003, /**< Device/business signing key */
 } actrust_crypto_key_id_t;
 
 /** @brief Number of entries in the key descriptor table. */
-#define ACTRUST_CRYPTO_KEY_ID_COUNT 3
+#define ACTRUST_CRYPTO_KEY_ID_COUNT 4
 
 /** @brief Registered certificate identifiers. */
 typedef enum {
@@ -213,6 +214,24 @@ actrust_err_t actrust_crypto_hash(actrust_crypto_ctx_t      ctx,
  */
 actrust_err_t actrust_crypto_key_open(actrust_crypto_ctx_t ctx, uint32_t key_id,
                                       actrust_crypto_key_t *out_key);
+
+/**
+ * @brief Copy a persistent key between logical IDs without exporting it.
+ *
+ * The source and destination descriptors must use the same backend. Hardware
+ * backends may reject this operation when their secure element has no key-copy
+ * primitive; callers must not fall back to exporting private key material.
+ *
+ * @param[in] ctx        Crypto context.
+ * @param[in] source_id  Existing persistent key identifier.
+ * @param[in] target_id  Destination persistent key identifier.
+ *
+ * @return @c ACTRUST_OK when the destination was persisted.
+ * @return @c ACTRUST_ERR_UNSUPPORTED when the backend cannot copy the key.
+ */
+actrust_err_t actrust_crypto_key_migrate(actrust_crypto_ctx_t ctx,
+                                         uint32_t             source_id,
+                                         uint32_t             target_id);
 
 /**
  * @brief Close a key handle and release associated memory.

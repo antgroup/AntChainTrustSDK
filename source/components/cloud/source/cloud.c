@@ -106,13 +106,29 @@ actrust_err_t actrust_cloud_deinit(actrust_cloud_t cloud)
         return CLOUD_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    actrust_err_t ret = cloud->provider_ops->deinit(cloud);
-    if (ret != ACTRUST_OK) {
-        return CLOUD_ERR(ACTRUST_ERR_CLOUD_DEINIT_FAILED);
+    actrust_err_t first_err = ACTRUST_OK;
+    if (cloud->provider_ctx != NULL) {
+        actrust_err_t ret = cloud->provider_ops->deinit(cloud);
+        if (ret != ACTRUST_OK) {
+            LOG_ERROR("cloud provider deinit failed: 0x%08" PRIx32, ret);
+            first_err = ret;
+        }
+        if (cloud->provider_ctx != NULL) {
+            return CLOUD_ERR(ACTRUST_ERR_CLOUD_DEINIT_FAILED);
+        }
     }
 
-    ret = actrust_queue_destroy(&cloud->downlink_queue);
-    if (ret != ACTRUST_OK) {
+    if (cloud->downlink_queue != NULL) {
+        actrust_err_t ret = actrust_queue_destroy(&cloud->downlink_queue);
+        if (ret != ACTRUST_OK) {
+            LOG_ERROR("cloud downlink queue destroy failed: 0x%08" PRIx32, ret);
+            if (first_err == ACTRUST_OK) {
+                first_err = ret;
+            }
+        }
+    }
+
+    if (first_err != ACTRUST_OK) {
         return CLOUD_ERR(ACTRUST_ERR_CLOUD_DEINIT_FAILED);
     }
 

@@ -57,18 +57,29 @@ CONFIG_ACTRUST_SEC_SLOT_CERT_COUNT=8
 #
 # Security HW Capabilities
 #
-CONFIG_ACTRUST_SEC_HW_RANDOM=y
+# Security capabilities provided by the SIMCom adapter:
+# Sunsea TEE secure-data storage is available. Random bytes use the Linux
+# kernel CSPRNG and are not a TEE/TRNG capability. Secure key management,
+# ECDSA, hash, and AES services are unavailable.
+#
+# CONFIG_ACTRUST_SEC_HW_RANDOM is not set
 # CONFIG_ACTRUST_SEC_HW_KEY_MGMT is not set
 # CONFIG_ACTRUST_SEC_HW_ECDSA is not set
 # CONFIG_ACTRUST_SEC_HW_HASH is not set
 # CONFIG_ACTRUST_SEC_HW_AES is not set
 
 #
+# Crypto key profile
+#
+CONFIG_ACTRUST_CRYPTO_KEY_PROFILE_DEVELOPMENT=y
+# CONFIG_ACTRUST_CRYPTO_KEY_PROFILE_PRODUCTION is not set
+
+#
 # Storage
 #
 CONFIG_ACTRUST_STORAGE_BASE_DIR="/data/actrust/storage"
-CONFIG_ACTRUST_SEC_STORE_BASE_DIR="/data/actrust/security"
 CONFIG_ACTRUST_STORAGE_FILE_PREFIX="actrust_kv_"
+CONFIG_ACTRUST_STORAGE_REGION_SIZE=75000
 
 #
 # Components
@@ -79,7 +90,6 @@ CONFIG_ACTRUST_STORAGE_FILE_PREFIX="actrust_kv_"
 #
 CONFIG_ACTRUST_COMPONENTS_CLOUD=y
 CONFIG_ACTRUST_CLOUD_PLATFORM_AWS=y
-# CONFIG_ACTRUST_CLOUD_PLATFORM_ALIYUN is not set
 CONFIG_ACTRUST_CLOUD_DOWNLINK_QUEUE_SIZE=16
 
 #

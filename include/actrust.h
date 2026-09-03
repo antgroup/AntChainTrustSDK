@@ -38,10 +38,19 @@ typedef enum {
 /**
  * @brief Async completion callback signature.
  *
+ * The callback is invoked synchronously after an accepted asynchronous
+ * operation completes. Only an operation accepted by a public API produces a
+ * callback; invalid arguments, invalid state, resource exhaustion, and
+ * allocation failures are reported synchronously by that API instead. The
+ * callback must not call
+ * @ref actrust_deinit; defer teardown until the callback returns. The
+ * @p user_data pointer is borrowed and must remain valid until all callbacks
+ * that use it have completed.
+ *
  * @param[in] result     Operation result — @c ACTRUST_OK on success.
- * @param[in] state      Core lifecycle state observed at callback time, after
- *                       the job has been dispatched and any state transitions
- *                       made by that job have been applied.
+ * @param[in] state      SDK lifecycle state observed when the callback is
+ *                       invoked, after the operation's state change has been
+ *                       applied.
  * @param[in] user_data  Opaque pointer set via @ref actrust_set_callback.
  */
 typedef void (*actrust_callback_t)(actrust_err_t        result,
@@ -49,6 +58,13 @@ typedef void (*actrust_callback_t)(actrust_err_t        result,
 
 /**
  * @brief Bootstrap configuration consumed by @ref actrust_init.
+ *
+ * When non-NULL, the certificate and key bytes are copied while initialization
+ * is submitted. The caller may release or modify the source buffers after
+ * @ref actrust_init returns. Both certificate and key buffers must be provided
+ * together; a partial or malformed configuration is rejected synchronously or
+ * reported by the asynchronous init callback, depending on the failure point.
+ * When @p config is NULL, the configured credential store is used.
  */
 typedef struct {
     const char
@@ -67,8 +83,13 @@ typedef struct {
 /**
  * @brief Set the global async completion callback.
  *
- * All subsequent async API calls will invoke @p cb on completion.
- * Must be called before @ref actrust_init.
+ * All subsequent asynchronous API calls will invoke @p cb on completion. The
+ * callback runs synchronously in the SDK's service context, so application code
+ * should normally record the result and perform the next SDK call from its own
+ * task or main loop. Only calls accepted after this function returns can
+ * produce callbacks. Must be called before @ref actrust_init. The @p user_data
+ * pointer is borrowed and must remain valid until callback delivery is
+ * complete.
  *
  * @param[in] cb         Completion callback (must not be NULL).
  * @param[in] user_data  Opaque pointer forwarded to every @p cb invocation.
@@ -81,35 +102,42 @@ actrust_err_t actrust_set_callback(actrust_callback_t cb, void *user_data);
 /**
  * @brief Initialise the Core framework.
  *
- * Initialises the single global context resources (JobPool and JobQueue),
- * submits an asynchronous INIT job, then starts the Service task.  The callback
- * fires once the init logic (credential loading, etc.) completes on the Service
- * thread.
+ * Initialises the single global SDK context, submits an asynchronous
+ * initialisation request, then starts the service context. The callback fires
+ * once initialisation, including credential loading, completes.
  *
  * @param[in] config  Optional first-boot provisioning config; may be @c NULL
  *                    when claim credentials are already stored.
  *
  * @return @c ACTRUST_OK — job submitted; await callback for result.
- * @return @c ACTRUST_ERR_BAD_STATE if core is already initialised,
- *         initialising, or waiting for failed-init cleanup.
- * @return @c ACTRUST_ERR_NOT_READY if internal resources are unavailable.
+ * @return @c ACTRUST_ERR_BAD_STATE if the SDK is already initialised,
+ *         initialising, or waiting for failed-initialisation cleanup.
+ * @return @c ACTRUST_ERR_NOT_READY if the SDK callback or internal resources
+ *         are unavailable.
  */
 actrust_err_t actrust_init(const actrust_config_t *config);
 
 /**
  * @brief Tear down the Core framework.
  *
- * Submits a DEINIT job and waits for service shutdown. When this call returns,
- * internal Core resources have been released.
+ * Requests asynchronous shutdown and waits for it to complete. When this call
+ * returns, the SDK is no longer usable until a new initialization. Failures
+ * that prevent the request from being accepted are returned synchronously;
+ * failures during shutdown are reported through the completion callback.
+ * Calling
+ * @c actrust_deinit from a callback is invalid and must be deferred until the
+ * callback returns.
  *
  * @pre The caller must call @ref actrust_disconnect and wait for the disconnect
- *      callback before invoking this function.  Calling @c actrust_deinit while
- *      a session is still active results in undefined behavior.
+ *      callback before invoking this function. The call is valid only when the
+ *      SDK is in a deinitialisable state; an active session must not be torn
+ *      down. Failed initialisation is deinitialisable after the callback
+ *      reports @ref ACTRUST_CORE_INIT_FAILED.
  *
  * @return @c ACTRUST_OK on successful shutdown.
- * @return @c ACTRUST_ERR_BAD_STATE if core is not in a deinitialisable state.
- *         Failed initialisation is deinitialisable after the callback reports
- *         @ref ACTRUST_CORE_INIT_FAILED.
+ * @return @c ACTRUST_ERR_BAD_STATE if the SDK is not in a deinitialisable
+ *         state. Failed initialisation is deinitialisable after the callback
+ *         reports @ref ACTRUST_CORE_INIT_FAILED.
  */
 actrust_err_t actrust_deinit(void);
 
@@ -140,12 +168,22 @@ actrust_err_t actrust_register(void);
 /**
  * @brief Publish business data over the Runtime session.
  *
- * @param[in] data      Payload text bytes (copied internally before return).
- *                      The payload must not contain NUL bytes.
+ * The input must be non-empty bytes without embedded NUL characters. The SDK
+ * copies the bytes before returning, obtains a timestamp, signs the generated
+ * representation, and submits the resulting business update through the
+ * configured cloud provider. The operation requires time synchronisation and
+ * is subject to the configured transport and generated-message size limits. A
+ * successful return means only that the asynchronous operation was accepted; it
+ * does not confirm remote service or blockchain acknowledgement. Processing
+ * errors are reported by the callback.
+ *
+ * @param[in] data      Business payload bytes (copied internally before
+ *                      return).
  * @param[in] data_len  Payload length in bytes.
  *
  * @return @c ACTRUST_OK on successful submission.
- * @return @c ACTRUST_ERR_INVALID_ARG if @p data is NULL or @p data_len is zero.
+ * @return @c ACTRUST_ERR_INVALID_ARG if @p data is NULL, @p data_len is zero,
+ *         or the payload contains NUL bytes.
  * @return @c ACTRUST_ERR_BAD_STATE if core is not in the REGISTERED state.
  * @return @c ACTRUST_ERR_NO_MEM if insufficient memory for the payload copy.
  */

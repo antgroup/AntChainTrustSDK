@@ -39,6 +39,37 @@ find_library(SUNSEA_SDK_LIB NAMES sunseasdk)
 find_library(TEEC_LIB NAMES teec)
 find_library(OPENSSL_CRYPTO_LIB NAMES crypto)
 
+set(SIMCOM_MISSING_LIBRARIES)
+foreach(
+    simcom_library
+    IN
+    ITEMS
+        SIMCOM_SDK_LIB
+        SIMCOM_LOG_LIB
+        SIMCOM_UCI_LIB
+        SUNSEA_SDK_LIB
+        TEEC_LIB
+        OPENSSL_CRYPTO_LIB
+)
+    if(
+        "${${simcom_library}}" STREQUAL ""
+        OR "${${simcom_library}}" MATCHES "-NOTFOUND$"
+    )
+        list(APPEND SIMCOM_MISSING_LIBRARIES "${simcom_library}")
+    endif()
+endforeach()
+
+if(SIMCOM_MISSING_LIBRARIES)
+    string(JOIN ", " SIMCOM_MISSING_LIBRARY_LIST ${SIMCOM_MISSING_LIBRARIES})
+    message(
+        FATAL_ERROR
+        "AntChainTrustSDK SIMCom dependencies are missing: "
+        "${SIMCOM_MISSING_LIBRARY_LIST}\n"
+        "Check ACTRUST_TOOLCHAIN_PATH and the toolchain sysroot library "
+        "directories before configuring the A7606E target."
+    )
+endif()
+
 # Link required libraries.
 target_link_libraries(
     adapter

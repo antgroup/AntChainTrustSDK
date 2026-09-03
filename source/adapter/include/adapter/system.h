@@ -40,6 +40,33 @@ typedef void *actrust_task_t;
 /** @} */
 
 /**
+ * @defgroup adapter_lifecycle Lifecycle Gate
+ * @{
+ */
+
+/**
+ * @brief Acquire the process-wide lifecycle gate.
+ * @return ACTRUST_OK on success.
+ * @return ACTRUST_ERR_HW_FAILURE if the platform lock operation fails.
+ * @note The gate is initialized before first use, allocates no heap memory, and
+ *       remains valid for the lifetime of the process. Use it only to serialize
+ *       component init/deinit admission, not as a component data lock.
+ * @warning The gate is non-recursive; the owning thread must not acquire it
+ *          again before releasing it.
+ */
+actrust_err_t actrust_lifecycle_lock(void);
+
+/**
+ * @brief Release the process-wide lifecycle gate.
+ * @return ACTRUST_OK on success.
+ * @return ACTRUST_ERR_HW_FAILURE if the platform unlock operation fails.
+ * @warning Must be called by the thread that acquired the gate.
+ */
+actrust_err_t actrust_lifecycle_unlock(void);
+
+/** @} */
+
+/**
  * @defgroup adapter_memory Memory Allocation
  * @{
  */

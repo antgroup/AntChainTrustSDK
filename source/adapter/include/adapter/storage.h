@@ -8,6 +8,9 @@
  * Provides a uniform block-level storage API that platform adapters implement.
  * Each storage instance is identified by a numeric ID and supports
  * random-access read, write, and erase operations on byte-addressable regions.
+ * Implementations must provide the logical region capacity and a persistence
+ * barrier through @ref actrust_storage_get_capacity and
+ * @ref actrust_storage_sync.
  */
 
 #ifndef ACTRUST_STORAGE_H
@@ -58,6 +61,30 @@ actrust_err_t actrust_storage_open(actrust_storage_t   *out,
  * @return @c ACTRUST_ERR_INVALID_ARG if @p st is NULL
  */
 actrust_err_t actrust_storage_close(actrust_storage_t st);
+
+/**
+ * @brief Return the logical capacity of a storage region
+ *
+ * @param[in]  st       Storage handle
+ * @param[out] capacity Receives the capacity in bytes
+ *
+ * @return @c ACTRUST_OK on success
+ * @return @c ACTRUST_ERR_INVALID_ARG if @p st or @p capacity is NULL
+ * @return @c ACTRUST_ERR_IO if the capacity cannot be determined
+ */
+actrust_err_t actrust_storage_get_capacity(actrust_storage_t st,
+                                           uint32_t         *capacity);
+
+/**
+ * @brief Flush completed writes to persistent storage
+ *
+ * @param[in] st Storage handle
+ *
+ * @return @c ACTRUST_OK when writes are synchronized
+ * @return @c ACTRUST_ERR_INVALID_ARG if @p st is NULL
+ * @return @c ACTRUST_ERR_IO if synchronization fails
+ */
+actrust_err_t actrust_storage_sync(actrust_storage_t st);
 
 /**
  * @brief Read data from a storage region

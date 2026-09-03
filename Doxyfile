@@ -8,15 +8,15 @@
 #
 #   doxygen Doxyfile
 #
-# Output is written to docs/html/ (git-ignored). Only a curated set of
+# Output is written to docs/v1.1.0/html/ (generated files are git-ignored). Only a curated set of
 # public interfaces is documented; 3rdparts/ and build artifacts are excluded.
 # =============================================================================
 
 # --- Project ---------------------------------------------------------------
 PROJECT_NAME           = "AntChainTrustSDK"
-PROJECT_NUMBER         = 1.0.0
+PROJECT_NUMBER         = 1.1.0
 PROJECT_BRIEF          = "Modular IoT framework for embedded systems"
-OUTPUT_DIRECTORY       = docs
+OUTPUT_DIRECTORY       = docs/v1.1.0
 CREATE_SUBDIRS         = NO
 
 # --- Input -----------------------------------------------------------------

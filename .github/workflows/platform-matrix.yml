@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Platform Matrix
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-arm-build:
+    name: Linux ARM cross-build
+    runs-on: ubuntu-24.04
+    env:
+      ACTRUST_ARM_LINUX_TOOLCHAIN_PREFIX: arm-linux-gnueabihf-
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure build environment
+        run: echo "BUILD_DIR=${RUNNER_TEMP}/actrust-linux-arm" >> "${GITHUB_ENV}"
+
+      - name: Install ARM Linux toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils-arm-linux-gnueabihf \
+            gcc-arm-linux-gnueabihf
+          arm-linux-gnueabihf-gcc --version
+          arm-linux-gnueabihf-readelf --version
+
+      - name: Build Linux ARM
+        run: ./build.sh linux_arm --clean-build
+
+      - name: Verify Linux ARM objects
+        run: |
+          object_file="$(find "${BUILD_DIR}/source" -type f -name '*.o' -print -quit)"
+          test -n "${object_file}"
+          arm-linux-gnueabihf-readelf -h "${object_file}"
+          arm-linux-gnueabihf-readelf -h "${object_file}" \
+            | grep -Eq 'Class:[[:space:]]+ELF32|Machine:[[:space:]]+ARM'
+          printf 'Linux ARM build: PASS\n' >> "${GITHUB_STEP_SUMMARY}"
+
+  android-build:
+    name: Android arm64-v8a
+    runs-on: ubuntu-24.04
+    env:
+      ANDROID_ABI: arm64-v8a
+      ANDROID_PLATFORM: android-23
+      ANDROID_NDK_VERSION: 26.3.11579264
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure build environment
+        run: echo "BUILD_DIR=${RUNNER_TEMP}/actrust-android-arm64-v8a" >> "${GITHUB_ENV}"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          yes | sdkmanager --licenses
+          yes | sdkmanager "platforms;android-23" "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" >> "${GITHUB_ENV}"
+          ndk_bin="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "${ndk_bin}/clang" --version
+          "${ndk_bin}/llvm-readelf" --version
+
+      - name: Build Android
+        run: ./build.sh android --clean-build
+
+      - name: Verify Android objects
+        run: |
+          object_file="$(find "${BUILD_DIR}/source" -type f -name '*.o' -print -quit)"
+          test -n "${object_file}"
+          readelf_cmd="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          "${readelf_cmd}" -h "${object_file}"
+          "${readelf_cmd}" -h "${object_file}" \
+            | grep -Eq 'Class:[[:space:]]+ELF64|Machine:[[:space:]]+AArch64'
+          {
+            echo '### Platform build status'
+            echo ''
+            echo '- Android arm64-v8a build: PASS'
+            echo '- Android device tests: NOT RUN (no target device in hosted CI)'
+          } >> "${GITHUB_STEP_SUMMARY}"
+

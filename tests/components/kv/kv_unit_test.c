@@ -24,7 +24,7 @@
 #define ACTRUST_TEST_KV_NAMESPACE_LEN 6u
 #define ACTRUST_TEST_KV_STORAGE_ID    0x00000001u
 #define ACTRUST_TEST_KV_RECORD_IN_USE 0x01u
-
+#define ACTRUST_TEST_KV_DATA_OFFSET   128u
 static actrust_kv_t kv;
 
 typedef struct {
@@ -84,22 +84,22 @@ void test_open_zero_len(void)
                           actrust_kv_open(ACTRUST_TEST_KV_NAMESPACE, 0, &h));
 }
 
-void test_open_rejects_unformatted_storage(void)
+void test_open_formats_virgin_storage(void)
 {
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_kv_close(kv));
     kv = NULL;
 
-    actrust_storage_t st = NULL;
+    actrust_storage_t st       = NULL;
+    uint32_t          capacity = 0u;
     TEST_ASSERT_EQUAL(ACTRUST_OK,
                       actrust_storage_open(&st, ACTRUST_TEST_KV_STORAGE_ID));
-    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_erase(st, 0, 64));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_get_capacity(st, &capacity));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_erase(st, 0u, capacity));
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_close(st));
 
-    actrust_kv_t  h   = NULL;
-    actrust_err_t err = actrust_kv_open(ACTRUST_TEST_KV_NAMESPACE,
-                                        ACTRUST_TEST_KV_NAMESPACE_LEN, &h);
-    TEST_ASSERT_EQUAL(ACTRUST_ERR_BAD_STATE, ACTRUST_ERR_CODE(err));
-    TEST_ASSERT_NULL(h);
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_kv_open(ACTRUST_TEST_KV_NAMESPACE,
+                                      ACTRUST_TEST_KV_NAMESPACE_LEN, &kv));
 }
 
 void test_set_get_roundtrip(void)
@@ -155,9 +155,10 @@ void test_get_rejects_corrupt_record_value_len(void)
     TEST_ASSERT_EQUAL(ACTRUST_OK,
                       actrust_storage_open(&st, ACTRUST_TEST_KV_STORAGE_ID));
 
-    bool found = false;
+    bool     found      = false;
+    uint32_t len_offset = 0u;
     for (size_t i = 0; i < CONFIG_ACTRUST_KV_MAX_RECORDS; ++i) {
-        uint32_t         rec_offset = (uint32_t) (sizeof(test_kv_header_t) +
+        uint32_t         rec_offset = (uint32_t) (ACTRUST_TEST_KV_DATA_OFFSET +
                                           sizeof(test_kv_record_t) * i);
         test_kv_record_t rec;
 
@@ -167,9 +168,9 @@ void test_get_rejects_corrupt_record_value_len(void)
         if (rec.head.used == ACTRUST_TEST_KV_RECORD_IN_USE &&
             rec.head.key_len == 1u && rec.head.key[0] == (uint8_t) 'k') {
             uint32_t bad_len = (uint32_t) CONFIG_ACTRUST_KV_MAX_VALUE_LEN + 1u;
-            uint32_t len_offset =
-                rec_offset + (uint32_t) offsetof(test_kv_record_t, head) +
-                (uint32_t) offsetof(test_kv_record_head_t, value_len);
+            len_offset       = rec_offset +
+                         (uint32_t) offsetof(test_kv_record_t, head) +
+                         (uint32_t) offsetof(test_kv_record_head_t, value_len);
 
             TEST_ASSERT_EQUAL(ACTRUST_OK,
                               actrust_storage_write(st, len_offset,
@@ -186,7 +187,69 @@ void test_get_rejects_corrupt_record_value_len(void)
     char          buf[16];
     size_t        len = 0;
     actrust_err_t err = actrust_kv_get(kv, "k", 1, buf, sizeof(buf), &len);
-    TEST_ASSERT_EQUAL(ACTRUST_ERR_NO_RESOURCE, ACTRUST_ERR_CODE(err));
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_IO, ACTRUST_ERR_CODE(err));
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_storage_open(&st, ACTRUST_TEST_KV_STORAGE_ID));
+    uint32_t original_len = 4u;
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_storage_write(st, len_offset,
+                                            (const uint8_t *) &original_len,
+                                            sizeof(original_len)));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_close(st));
+}
+
+static test_kv_record_t s_original_record;
+static uint32_t         s_original_record_offset;
+
+static void corrupt_record_value(void)
+{
+    actrust_storage_t st = NULL;
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_storage_open(&st, ACTRUST_TEST_KV_STORAGE_ID));
+
+    test_kv_record_t rec;
+    uint32_t         rec_offset = (uint32_t) ACTRUST_TEST_KV_DATA_OFFSET;
+    TEST_ASSERT_EQUAL(
+        ACTRUST_OK,
+        actrust_storage_read(st, rec_offset, (uint8_t *) &rec, sizeof(rec)));
+    TEST_ASSERT_EQUAL(ACTRUST_TEST_KV_RECORD_IN_USE, rec.head.used);
+    s_original_record        = rec;
+    s_original_record_offset = rec_offset;
+    rec.value[0] ^= 0xFFu;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_write(st, rec_offset,
+                                                        (const uint8_t *) &rec,
+                                                        sizeof(rec)));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_close(st));
+}
+
+static void restore_original_record(void)
+{
+    actrust_storage_t st = NULL;
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_storage_open(&st, ACTRUST_TEST_KV_STORAGE_ID));
+    TEST_ASSERT_EQUAL(
+        ACTRUST_OK, actrust_storage_write(st, s_original_record_offset,
+                                          (const uint8_t *) &s_original_record,
+                                          sizeof(s_original_record)));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_close(st));
+}
+
+void test_corrupt_record_is_rejected_by_search_operations(void)
+{
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_kv_set(kv, "k", 1, "safe", 4));
+    corrupt_record_value();
+
+    bool          exists = true;
+    actrust_err_t err    = actrust_kv_exists(kv, "k", 1, &exists);
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_IO, ACTRUST_ERR_CODE(err));
+
+    err = actrust_kv_set(kv, "k", 1, "new", 3);
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_IO, ACTRUST_ERR_CODE(err));
+
+    err = actrust_kv_del(kv, "k", 1);
+    TEST_ASSERT_EQUAL(ACTRUST_ERR_IO, ACTRUST_ERR_CODE(err));
+    restore_original_record();
 }
 
 void test_del_and_exists(void)
@@ -275,12 +338,13 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_open_null_args);
     RUN_TEST(test_open_zero_len);
-    RUN_TEST(test_open_rejects_unformatted_storage);
+    RUN_TEST(test_open_formats_virgin_storage);
     RUN_TEST(test_set_get_roundtrip);
     RUN_TEST(test_set_overwrite);
     RUN_TEST(test_get_nonexistent);
     RUN_TEST(test_get_buffer_too_small);
     RUN_TEST(test_get_rejects_corrupt_record_value_len);
+    RUN_TEST(test_corrupt_record_is_rejected_by_search_operations);
     RUN_TEST(test_del_and_exists);
     RUN_TEST(test_del_nonexistent);
     RUN_TEST(test_exists_null_args);

@@ -149,6 +149,66 @@ static actrust_err_t core_post_job(const core_job_submit_t *submit)
     return ACTRUST_OK;
 }
 
+static actrust_err_t core_submit_job(const core_job_submit_t *submit,
+                                     actrust_core_state_t     required_state,
+                                     bool allow_registered_state)
+{
+    actrust_err_t err = actrust_lifecycle_lock();
+    if (ACTRUST_IS_ERR(err)) {
+        return err;
+    }
+
+    actrust_core_ctx_t *ctx = core_get_ctx();
+    if (ctx->lock == NULL || ctx->deinit_pending) {
+        (void) actrust_lifecycle_unlock();
+        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+
+    err = actrust_mutex_lock(ctx->lock);
+    if (ACTRUST_IS_ERR(err)) {
+        (void) actrust_lifecycle_unlock();
+        return err;
+    }
+
+    bool valid = ctx->state == required_state;
+    if (allow_registered_state) {
+        valid = valid || ctx->state == ACTRUST_CORE_REGISTERED;
+    }
+
+    if (!valid) {
+        err = CORE_ERR(ACTRUST_ERR_BAD_STATE);
+    } else {
+        err = core_post_job(submit);
+    }
+
+    (void) actrust_mutex_unlock(ctx->lock);
+    (void) actrust_lifecycle_unlock();
+    return err;
+}
+
+static actrust_err_t core_drain_pending_jobs(actrust_core_ctx_t *ctx)
+{
+    actrust_err_t first_err = ACTRUST_OK;
+
+    for (;;) {
+        actrust_job_t *job = NULL;
+        actrust_err_t  err =
+            actrust_job_queue_dequeue(&ctx->job_queue, 0u, &job);
+        if (ACTRUST_IS_ERR(err)) {
+            if (ACTRUST_ERR_MODULE(err) == ACTRUST_ERR_MODULE_CORE &&
+                ACTRUST_ERR_CODE(err) == ACTRUST_ERR_BAD_STATE) {
+                return first_err;
+            }
+            return ACTRUST_IS_OK(first_err) ? err : first_err;
+        }
+
+        err = actrust_job_release(&ctx->job_pool, job);
+        if (ACTRUST_IS_OK(first_err) && ACTRUST_IS_ERR(err)) {
+            first_err = err;
+        }
+    }
+}
+
 /* ========================================================================
  * Callback registration
  * ======================================================================== */
@@ -159,9 +219,19 @@ actrust_err_t actrust_set_callback(actrust_callback_t cb, void *user_data)
         return CORE_ERR(ACTRUST_ERR_INVALID_ARG);
     }
 
-    core_set_callback(
-        (actrust_callback_ctx_t){ .fn = cb, .user_data = user_data });
+    actrust_err_t err = actrust_lifecycle_lock();
+    if (ACTRUST_IS_ERR(err)) {
+        return err;
+    }
 
+    actrust_core_ctx_t *ctx = core_get_ctx();
+    if (ctx->lock != NULL || ctx->state != ACTRUST_CORE_UNINIT) {
+        (void) actrust_lifecycle_unlock();
+        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+
+    ctx->cb = (actrust_callback_ctx_t){ .fn = cb, .user_data = user_data };
+    (void) actrust_lifecycle_unlock();
     return ACTRUST_OK;
 }
 
@@ -171,22 +241,33 @@ actrust_err_t actrust_set_callback(actrust_callback_t cb, void *user_data)
 
 actrust_err_t actrust_init(const actrust_config_t *config)
 {
-    (void) actrust_log_init();
-    LOG_INFO("core init requested");
-
-    actrust_core_ctx_t *ctx = core_get_ctx();
-
-    if (core_get_state() != ACTRUST_CORE_UNINIT) {
-        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
-    }
-
-    if (ctx->cb.fn == NULL) {
-        return CORE_ERR(ACTRUST_ERR_NOT_READY);
-    }
-
-    actrust_err_t err = actrust_mutex_create(&ctx->lock);
+    actrust_err_t err = actrust_lifecycle_lock();
     if (ACTRUST_IS_ERR(err)) {
         return err;
+    }
+
+    actrust_core_ctx_t *ctx = core_get_ctx();
+    if (ctx->lock != NULL || ctx->state != ACTRUST_CORE_UNINIT) {
+        (void) actrust_lifecycle_unlock();
+        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+    if (ctx->cb.fn == NULL) {
+        (void) actrust_lifecycle_unlock();
+        return CORE_ERR(ACTRUST_ERR_NOT_READY);
+    }
+    err = actrust_log_init();
+    if (ACTRUST_IS_ERR(err)) {
+        (void) actrust_lifecycle_unlock();
+        return err;
+    }
+
+    ctx->state = ACTRUST_CORE_INITING;
+
+    bool service_start_failed = false;
+
+    err = actrust_mutex_create(&ctx->lock);
+    if (ACTRUST_IS_ERR(err)) {
+        goto fail_gate;
     }
 
     err = actrust_job_pool_init(&ctx->job_pool);
@@ -200,10 +281,8 @@ actrust_err_t actrust_init(const actrust_config_t *config)
         goto fail_pool;
     }
 
-    core_set_state(ACTRUST_CORE_INITING);
+    ctx->state = ACTRUST_CORE_INITING;
 
-    /* core_post_job allocates a job and enqueues it; on failure it releases
-     * the job back to the pool itself, so no extra cleanup is required here. */
     core_job_submit_t submit = {
         .type               = ACTRUST_JOB_INIT,
         .params.init.config = config,
@@ -216,128 +295,273 @@ actrust_err_t actrust_init(const actrust_config_t *config)
 
     err = core_service_start();
     if (ACTRUST_IS_ERR(err)) {
-        LOG_ERROR("core service start failed: 0x%08" PRIx32, err);
+        service_start_failed = true;
         goto fail_service;
     }
 
+    (void) actrust_lifecycle_unlock();
     LOG_INFO("core service started");
     return ACTRUST_OK;
 
-fail_service: {
-    actrust_job_t *job = NULL;
-    while (ACTRUST_IS_OK(actrust_job_queue_dequeue(&ctx->job_queue, 0, &job))) {
-        (void) actrust_job_release(&ctx->job_pool, job);
-    }
-}
+fail_service:
+    (void) actrust_job_queue_close(&ctx->job_queue);
+    (void) core_drain_pending_jobs(ctx);
+    ctx->state = ACTRUST_CORE_UNINIT;
+    goto fail_queue_closed;
 fail_queue:
-    core_set_state(ACTRUST_CORE_UNINIT);
+    ctx->state = ACTRUST_CORE_UNINIT;
+    (void) actrust_job_queue_close(&ctx->job_queue);
+fail_queue_closed:
     (void) actrust_job_queue_deinit(&ctx->job_queue);
 fail_pool:
     (void) actrust_job_pool_deinit(&ctx->job_pool);
 fail_lock:
     (void) actrust_mutex_destroy(ctx->lock);
     ctx->lock = NULL;
+fail_gate:
+    ctx->state = ACTRUST_CORE_UNINIT;
+    (void) actrust_lifecycle_unlock();
+    if (service_start_failed) {
+        LOG_ERROR("core service start failed: 0x%08" PRIx32, err);
+    }
     return err;
+}
+
+static void core_deinit_clear_finalizing(actrust_core_ctx_t *ctx)
+{
+    if (ctx->lock != NULL && actrust_mutex_lock(ctx->lock) == ACTRUST_OK) {
+        ctx->deinit_finalizing = false;
+        (void) actrust_mutex_unlock(ctx->lock);
+    }
+}
+
+static void core_deinit_restore_state(actrust_core_ctx_t  *ctx,
+                                      actrust_core_state_t previous_state)
+{
+    if (ctx->lock != NULL && actrust_mutex_lock(ctx->lock) == ACTRUST_OK) {
+        ctx->state             = previous_state;
+        ctx->deinit_pending    = false;
+        ctx->deinit_finalizing = false;
+        ctx->deinit_job_done   = false;
+        ctx->deinit_result     = ACTRUST_OK;
+        ctx->deinit_phase      = ACTRUST_CORE_DEINIT_PHASE_JOB;
+        (void) actrust_mutex_unlock(ctx->lock);
+    }
 }
 
 actrust_err_t actrust_deinit(void)
 {
     LOG_INFO("core deinit requested");
 
-    actrust_core_ctx_t *ctx = core_get_ctx();
-
-    /* Atomically claim the deinit slot. Concurrent callers fail here, so we
-     * cannot end up running cleanup twice on the same ctx. */
-    if (!core_try_acquire_deinit()) {
-        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
-    }
-
-    core_job_submit_t submit = {
-        .type = ACTRUST_JOB_DEINIT,
-    };
-
-    actrust_err_t err = core_post_job(&submit);
+    actrust_err_t err = actrust_lifecycle_lock();
     if (ACTRUST_IS_ERR(err)) {
-        core_lock();
-        ctx->deinit_pending = false;
-        core_unlock();
         return err;
     }
 
-    (void) core_service_stop();
-
-    actrust_job_t *job = NULL;
-    /* Drain any remaining jobs from the queue and release them back to the
-     * pool. */
-    while (ACTRUST_IS_OK(actrust_job_queue_dequeue(&ctx->job_queue, 0, &job))) {
-        (void) actrust_job_release(&ctx->job_pool, job);
+    actrust_core_ctx_t *ctx = core_get_ctx();
+    if (ctx->lock == NULL) {
+        (void) actrust_lifecycle_unlock();
+        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
     }
 
-    (void) actrust_job_queue_deinit(&ctx->job_queue);
-    (void) actrust_job_pool_deinit(&ctx->job_pool);
-    core_lock();
-    ctx->deinit_pending = false;
-    core_unlock();
-    core_set_state(ACTRUST_CORE_UNINIT);
-    (void) actrust_mutex_destroy(ctx->lock);
-    ctx->lock = NULL;
+    err = actrust_mutex_lock(ctx->lock);
+    if (ACTRUST_IS_ERR(err)) {
+        (void) actrust_lifecycle_unlock();
+        return err;
+    }
 
+    if (ctx->callback_active || ctx->deinit_finalizing) {
+        (void) actrust_mutex_unlock(ctx->lock);
+        (void) actrust_lifecycle_unlock();
+        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+
+    bool                 new_deinit     = false;
+    actrust_core_state_t previous_state = ACTRUST_CORE_READY;
+    if (ctx->state == ACTRUST_CORE_READY ||
+        ctx->state == ACTRUST_CORE_INIT_FAILED) {
+        previous_state       = ctx->state;
+        ctx->deinit_pending  = true;
+        ctx->deinit_job_done = false;
+        ctx->deinit_result   = ACTRUST_OK;
+        ctx->deinit_phase    = ACTRUST_CORE_DEINIT_PHASE_JOB;
+        ctx->state           = ACTRUST_CORE_DEINIT;
+        new_deinit           = true;
+    } else if (ctx->state != ACTRUST_CORE_DEINIT || !ctx->deinit_pending) {
+        (void) actrust_mutex_unlock(ctx->lock);
+        (void) actrust_lifecycle_unlock();
+        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+
+    ctx->deinit_finalizing = true;
+    bool submit_job =
+        ctx->deinit_phase == ACTRUST_CORE_DEINIT_PHASE_JOB &&
+        (new_deinit ||
+         (ctx->service_task == NULL &&
+          (!ctx->deinit_job_done || ACTRUST_IS_ERR(ctx->deinit_result))));
+    bool start_service = submit_job && ctx->service_task == NULL;
+    (void) actrust_mutex_unlock(ctx->lock);
+    (void) actrust_lifecycle_unlock();
+
+    if (submit_job) {
+        core_job_submit_t submit = {
+            .type = ACTRUST_JOB_DEINIT,
+        };
+        err = core_post_job(&submit);
+        if (ACTRUST_IS_ERR(err)) {
+            core_deinit_restore_state(ctx, previous_state);
+            return err;
+        }
+        if (start_service) {
+            err = core_service_start();
+            if (ACTRUST_IS_ERR(err)) {
+                (void) core_drain_pending_jobs(ctx);
+                core_deinit_restore_state(ctx, previous_state);
+                return err;
+            }
+        }
+    }
+
+    if (ctx->deinit_phase == ACTRUST_CORE_DEINIT_PHASE_JOB) {
+        err = core_service_stop();
+        if (ACTRUST_IS_ERR(err)) {
+            core_deinit_clear_finalizing(ctx);
+            return err;
+        }
+
+        err = actrust_lifecycle_lock();
+        if (ACTRUST_IS_ERR(err)) {
+            core_deinit_clear_finalizing(ctx);
+            return err;
+        }
+        if (ctx->lock == NULL) {
+            (void) actrust_lifecycle_unlock();
+            return CORE_ERR(ACTRUST_ERR_BAD_STATE);
+        }
+        err = actrust_mutex_lock(ctx->lock);
+        if (ACTRUST_IS_ERR(err)) {
+            core_deinit_clear_finalizing(ctx);
+            (void) actrust_lifecycle_unlock();
+            return err;
+        }
+
+        if (!ctx->deinit_job_done) {
+            ctx->deinit_finalizing = false;
+            (void) actrust_mutex_unlock(ctx->lock);
+            (void) actrust_lifecycle_unlock();
+            return CORE_ERR(ACTRUST_ERR_BAD_STATE);
+        }
+        if (ACTRUST_IS_ERR(ctx->deinit_result)) {
+            err                    = ctx->deinit_result;
+            ctx->deinit_finalizing = false;
+            (void) actrust_mutex_unlock(ctx->lock);
+            (void) actrust_lifecycle_unlock();
+            return err;
+        }
+
+        ctx->deinit_phase = ACTRUST_CORE_DEINIT_PHASE_QUEUE;
+        (void) actrust_mutex_unlock(ctx->lock);
+        (void) actrust_lifecycle_unlock();
+    }
+
+    err = actrust_lifecycle_lock();
+    if (ACTRUST_IS_ERR(err)) {
+        core_deinit_clear_finalizing(ctx);
+        return err;
+    }
+    if (ctx->lock == NULL) {
+        (void) actrust_lifecycle_unlock();
+        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
+    }
+    err = actrust_mutex_lock(ctx->lock);
+    if (ACTRUST_IS_ERR(err)) {
+        (void) actrust_lifecycle_unlock();
+        return err;
+    }
+
+    if (ctx->deinit_phase == ACTRUST_CORE_DEINIT_PHASE_QUEUE) {
+        err = actrust_job_queue_close(&ctx->job_queue);
+        if (ACTRUST_IS_OK(err)) {
+            err = core_drain_pending_jobs(ctx);
+        }
+        if (ACTRUST_IS_OK(err)) {
+            err = actrust_job_queue_deinit(&ctx->job_queue);
+        }
+        if (ACTRUST_IS_ERR(err)) {
+            ctx->deinit_finalizing = false;
+            (void) actrust_mutex_unlock(ctx->lock);
+            (void) actrust_lifecycle_unlock();
+            return err;
+        }
+        ctx->deinit_phase = ACTRUST_CORE_DEINIT_PHASE_POOL;
+    }
+
+    if (ctx->deinit_phase == ACTRUST_CORE_DEINIT_PHASE_POOL) {
+        err = actrust_job_pool_deinit(&ctx->job_pool);
+        if (ACTRUST_IS_ERR(err)) {
+            ctx->deinit_finalizing = false;
+            (void) actrust_mutex_unlock(ctx->lock);
+            (void) actrust_lifecycle_unlock();
+            return err;
+        }
+        ctx->deinit_phase = ACTRUST_CORE_DEINIT_PHASE_LOCK;
+    }
+
+    if (ctx->deinit_phase == ACTRUST_CORE_DEINIT_PHASE_LOCK) {
+        actrust_mutex_t core_lock = ctx->lock;
+        (void) actrust_mutex_unlock(ctx->lock);
+        err = actrust_mutex_destroy(core_lock);
+        if (ACTRUST_IS_ERR(err)) {
+            core_deinit_clear_finalizing(ctx);
+            (void) actrust_lifecycle_unlock();
+            return err;
+        }
+
+        ctx->lock              = NULL;
+        ctx->state             = ACTRUST_CORE_UNINIT;
+        ctx->deinit_pending    = false;
+        ctx->deinit_finalizing = false;
+        ctx->deinit_job_done   = false;
+        ctx->deinit_result     = ACTRUST_OK;
+        ctx->deinit_phase      = ACTRUST_CORE_DEINIT_PHASE_JOB;
+    }
+
+    (void) actrust_lifecycle_unlock();
     LOG_INFO("core deinitialized");
     return ACTRUST_OK;
 }
 
 actrust_err_t actrust_connect(void)
 {
-    actrust_core_state_t state = core_get_state();
-    if (state != ACTRUST_CORE_READY) {
-        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
-    }
-
     core_job_submit_t submit = {
         .type = ACTRUST_JOB_CONNECT,
     };
 
-    return core_post_job(&submit);
+    return core_submit_job(&submit, ACTRUST_CORE_READY, false);
 }
 
 actrust_err_t actrust_disconnect(void)
 {
-    actrust_core_state_t state = core_get_state();
-    if (state != ACTRUST_CORE_UNREGISTERED &&
-        state != ACTRUST_CORE_REGISTERED) {
-        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
-    }
-
     core_job_submit_t submit = {
         .type = ACTRUST_JOB_DISCONNECT,
     };
 
-    return core_post_job(&submit);
+    return core_submit_job(&submit, ACTRUST_CORE_UNREGISTERED, true);
 }
 
 actrust_err_t actrust_register(void)
 {
-    actrust_core_state_t state = core_get_state();
-    if (state != ACTRUST_CORE_UNREGISTERED) {
-        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
-    }
-
     core_job_submit_t submit = {
         .type = ACTRUST_JOB_REGISTER,
     };
 
-    return core_post_job(&submit);
+    return core_submit_job(&submit, ACTRUST_CORE_UNREGISTERED, false);
 }
 
 actrust_err_t actrust_data_publish(const char *data, size_t data_len)
 {
     if (data == NULL || data_len == 0) {
         return CORE_ERR(ACTRUST_ERR_INVALID_ARG);
-    }
-
-    actrust_core_state_t state = core_get_state();
-    if (state != ACTRUST_CORE_REGISTERED) {
-        return CORE_ERR(ACTRUST_ERR_BAD_STATE);
     }
 
     if (memchr(data, '\0', data_len) != NULL) {
@@ -350,5 +574,5 @@ actrust_err_t actrust_data_publish(const char *data, size_t data_len)
         .params.send.data_len = data_len,
     };
 
-    return core_post_job(&submit);
+    return core_submit_job(&submit, ACTRUST_CORE_REGISTERED, false);
 }

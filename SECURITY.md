@@ -5,13 +5,16 @@ report a vulnerability and what to expect from the maintainers.
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| `main`  | :white_check_mark: |
-| < 1.0   | :x:                |
+| Version       | Supported          |
+| ------------- | ------------------ |
+| `1.1.x`       | :white_check_mark: |
+| `1.0.x`       | :white_check_mark: |
+| `< 1.0`       | :x:                |
 
-Security fixes are currently released on `main`. Stable release maintenance
-lines will be documented when the first stable release is published.
+Security fixes are released from the applicable stable maintenance line. The
+`release/v1.1.x` branch carries compatible patch fixes for the `v1.1` line;
+new public capabilities require a minor release and incompatible changes
+require a new major release.
 
 ## Reporting a Vulnerability
 
