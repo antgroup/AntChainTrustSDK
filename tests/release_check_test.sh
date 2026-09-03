@@ -42,7 +42,7 @@ else
     exit 1
 fi
 
-if python3 - "$ROOT_DIR/tools/release/check_release.py" <<'PY'
+if python3 - "$ROOT_DIR/tools/release/check_release.py" <<'PY'; then
 from importlib.util import module_from_spec, spec_from_file_location
 import sys
 
@@ -58,14 +58,13 @@ assert module.api_lines(
     "typedef struct { int public_old_member; } actrust_public_struct_t;\n"
 )
 PY
-then
     :
 else
     printf 'API extraction regression test failed\n' >&2
     exit 1
 fi
 
-if python3 - "$ROOT_DIR/tools/release/check_release.py" "$TMP_DIR" <<'PY'
+if python3 - "$ROOT_DIR/tools/release/check_release.py" "$TMP_DIR" <<'PY'; then
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
@@ -97,7 +96,6 @@ except SystemExit:
 else:
     raise AssertionError("ABI header change was not rejected")
 PY
-then
     :
 else
     printf 'ABI header regression test failed\n' >&2

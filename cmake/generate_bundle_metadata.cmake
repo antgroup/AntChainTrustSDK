@@ -24,7 +24,10 @@ foreach(_actrust_dependency IN LISTS _actrust_dependencies)
         OUTPUT_STRIP_TRAILING_WHITESPACE
         RESULT_VARIABLE _actrust_git_result
     )
-    if(NOT _actrust_git_result EQUAL 0 OR NOT _actrust_actual_sha STREQUAL _actrust_expected_sha)
+    if(
+        NOT _actrust_git_result EQUAL 0
+        OR NOT _actrust_actual_sha STREQUAL _actrust_expected_sha
+    )
         message(FATAL_ERROR "Dependency SHA mismatch for ${_actrust_name}")
     endif()
 endforeach()
