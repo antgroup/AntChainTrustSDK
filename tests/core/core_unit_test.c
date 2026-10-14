@@ -17,14 +17,17 @@
 #include "core/core_ops.h"
 
 /* Component */
+#include "cloud/cloud.h"
+#include "crypto/crypto.h"
 #include "kv/kv.h"
 
 /* Adapter */
 #include "adapter/system.h"
 
-#define TEST_JOB_QUEUE_TIMEOUT_MS 50u
-#define TEST_WORKER_TIMEOUT_MS    5000u
-#define TEST_WORKER_COUNT         2u
+#define TEST_JOB_QUEUE_TIMEOUT_MS   50u
+#define TEST_WORKER_TIMEOUT_MS      5000u
+#define TEST_WORKER_COUNT           2u
+#define TEST_SIGNING_PUBLIC_KEY_MAX 128u
 
 typedef struct {
     actrust_sem_t ready;
@@ -594,6 +597,23 @@ void test_deinit_recovers_after_async_init_failure(void)
         .claim_key      = claim_key,
         .claim_key_len  = sizeof(claim_key) - 1u,
     };
+    actrust_crypto_ctx_t crypto = NULL;
+    actrust_crypto_key_t key    = NULL;
+    uint8_t              expected_public[TEST_SIGNING_PUBLIC_KEY_MAX];
+    uint8_t              actual_public[TEST_SIGNING_PUBLIC_KEY_MAX];
+    size_t               expected_len = 0u;
+    size_t               actual_len   = 0u;
+
+    /* Persist a signer before Core opens it during initialization. */
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_crypto_init(&crypto));
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_crypto_key_generate(
+                          crypto, ACTRUST_CLOUD_SIGNING_KEY_ID, &key));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_crypto_key_export_public(
+                                      crypto, key, expected_public,
+                                      sizeof(expected_public), &expected_len));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_crypto_key_close(crypto, &key));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_crypto_deinit(&crypto));
 
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_set_callback(test_callback, NULL));
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_init(&config));
@@ -614,10 +634,23 @@ void test_deinit_recovers_after_async_init_failure(void)
     TEST_ASSERT_EQUAL(ACTRUST_OK, s_last_result);
     TEST_ASSERT_EQUAL(ACTRUST_CORE_READY, s_last_state);
 
+    actrust_core_ctx_t *ctx = core_get_ctx();
+    TEST_ASSERT_NOT_NULL(ctx->sign_key);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_crypto_key_export_public(
+                                      ctx->crypto, ctx->sign_key, actual_public,
+                                      sizeof(actual_public), &actual_len));
+    TEST_ASSERT_EQUAL_UINT(expected_len, actual_len);
+    TEST_ASSERT_EQUAL_MEMORY(expected_public, actual_public, expected_len);
+
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_deinit());
     TEST_ASSERT_TRUE(wait_for_callbacks(4, 5000u));
     TEST_ASSERT_EQUAL(ACTRUST_OK, s_last_result);
     TEST_ASSERT_EQUAL(ACTRUST_CORE_DEINIT, s_last_state);
+
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_crypto_init(&crypto));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_crypto_key_destroy(
+                                      crypto, ACTRUST_CLOUD_SIGNING_KEY_ID));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_crypto_deinit(&crypto));
 }
 
 void test_callback_fires_on_init(void)
