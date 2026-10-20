@@ -121,7 +121,21 @@ static bool wait_for_callbacks(int expected_count, uint32_t timeout_ms)
         }
         s_callbacks_seen++;
     }
-    return true;
+
+    /* The service clears callback_active only after our callback returns. */
+    uint64_t start = actrust_monotonic_ms();
+    for (;;) {
+        core_lock();
+        bool active = core_get_ctx()->callback_active;
+        core_unlock();
+        if (!active) {
+            return true;
+        }
+        if (actrust_monotonic_ms() - start >= timeout_ms) {
+            return false;
+        }
+        actrust_sleep_ms(1u);
+    }
 }
 
 static void init_worker(void *arg)
