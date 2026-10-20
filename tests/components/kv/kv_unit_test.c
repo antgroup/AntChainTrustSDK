@@ -27,6 +27,25 @@
 #define ACTRUST_TEST_KV_DATA_OFFSET   128u
 static actrust_kv_t kv;
 
+#ifdef ACTRUST_TEST_WRAP_KV_STORAGE
+static uint32_t s_storage_read_limit = UINT32_MAX;
+
+extern actrust_err_t __real_actrust_storage_read(actrust_storage_t st,
+                                                 uint32_t offset, uint8_t *buf,
+                                                 size_t len);
+
+actrust_err_t __wrap_actrust_storage_read(actrust_storage_t st, uint32_t offset,
+                                          uint8_t *buf, size_t len)
+{
+    if (offset > s_storage_read_limit ||
+        len > (size_t) (s_storage_read_limit - offset)) {
+        return ACTRUST_ERR(ACTRUST_ERR_MODULE_ADAPTER_STORAGE,
+                           ACTRUST_ERR_INVALID_ARG);
+    }
+    return __real_actrust_storage_read(st, offset, buf, len);
+}
+#endif
+
 typedef struct {
     uint32_t magic;
     uint16_t version;
@@ -50,6 +69,9 @@ typedef struct {
 
 void setUp(void)
 {
+#ifdef ACTRUST_TEST_WRAP_KV_STORAGE
+    s_storage_read_limit = UINT32_MAX;
+#endif
     kv = NULL;
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_kv_init());
     TEST_ASSERT_EQUAL(ACTRUST_OK,
@@ -97,35 +119,59 @@ void test_open_formats_virgin_storage(void)
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_erase(st, 0u, capacity));
     TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_storage_close(st));
 
-    TEST_ASSERT_EQUAL(ACTRUST_OK,
-                      actrust_kv_open(ACTRUST_TEST_KV_NAMESPACE,
-                                      ACTRUST_TEST_KV_NAMESPACE_LEN, &kv));
+#ifdef ACTRUST_TEST_WRAP_KV_STORAGE
+    s_storage_read_limit =
+        ACTRUST_TEST_KV_DATA_OFFSET +
+        ((44u + CONFIG_ACTRUST_KV_MAX_VALUE_LEN + 3u) & ~3u) *
+            CONFIG_ACTRUST_KV_MAX_RECORDS +
+        2u * (96u + CONFIG_ACTRUST_KV_MAX_VALUE_LEN);
+#endif
+    actrust_err_t err = actrust_kv_open(ACTRUST_TEST_KV_NAMESPACE,
+                                        ACTRUST_TEST_KV_NAMESPACE_LEN, &kv);
+#ifdef ACTRUST_TEST_WRAP_KV_STORAGE
+    s_storage_read_limit = UINT32_MAX;
+#endif
+    TEST_ASSERT_EQUAL(ACTRUST_OK, err);
 }
 
 void test_set_get_roundtrip(void)
 {
-    const char *val = "hello";
-    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_kv_set(kv, "k", 1, val, 5));
+    const char  key[] = "0123456789abcdef0123456789abcdef";
+    const char *val   = "hello";
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_kv_set(kv, key, sizeof(key) - 1u, val, 5));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_kv_close(kv));
+    kv = NULL;
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_kv_open(ACTRUST_TEST_KV_NAMESPACE,
+                                      ACTRUST_TEST_KV_NAMESPACE_LEN, &kv));
 
     char   buf[32];
     size_t len = 0;
-    TEST_ASSERT_EQUAL(ACTRUST_OK,
-                      actrust_kv_get(kv, "k", 1, buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_kv_get(kv, key, sizeof(key) - 1u, buf,
+                                                 sizeof(buf), &len));
     TEST_ASSERT_EQUAL(5u, len);
     TEST_ASSERT_EQUAL_MEMORY(val, buf, 5);
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_kv_del(kv, key, sizeof(key) - 1u));
 }
 
 void test_set_overwrite(void)
 {
-    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_kv_set(kv, "k", 1, "aaa", 3));
-    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_kv_set(kv, "k", 1, "bbbbb", 5));
+    uint8_t value[CONFIG_ACTRUST_KV_MAX_VALUE_LEN];
+    memset(value, 0x5Au, sizeof(value));
+    value[sizeof(value) - 1u] = 0xA5u;
 
-    char   buf[32];
-    size_t len = 0;
+    TEST_ASSERT_EQUAL(ACTRUST_OK, actrust_kv_set(kv, "k", 1, "aaa", 3));
+    TEST_ASSERT_EQUAL(ACTRUST_OK,
+                      actrust_kv_set(kv, "k", 1, value, sizeof(value)));
+
+    uint8_t buf[CONFIG_ACTRUST_KV_MAX_VALUE_LEN];
+    size_t  len = 0;
     TEST_ASSERT_EQUAL(ACTRUST_OK,
                       actrust_kv_get(kv, "k", 1, buf, sizeof(buf), &len));
-    TEST_ASSERT_EQUAL(5u, len);
-    TEST_ASSERT_EQUAL_MEMORY("bbbbb", buf, 5);
+    TEST_ASSERT_EQUAL(sizeof(value), len);
+    TEST_ASSERT_EQUAL_MEMORY(value, buf, sizeof(value));
+    TEST_ASSERT_EQUAL_HEX8(0xA5u, buf[sizeof(buf) - 1u]);
 }
 
 void test_get_nonexistent(void)

@@ -46,8 +46,8 @@
 /** @brief Build a KV-module-specific error code. */
 #define KV_ERR(reason) ACTRUST_ERR(ACTRUST_ERR_MODULE_COMPONENTS_KV, (reason))
 
-#if CONFIG_ACTRUST_KV_MAX_KEY_LEN > UINT8_MAX
-#error "CONFIG_ACTRUST_KV_MAX_KEY_LEN must fit in kv_record_head_t.key_len"
+#if CONFIG_ACTRUST_KV_MAX_KEY_LEN != 32
+#error "KV v2 requires CONFIG_ACTRUST_KV_MAX_KEY_LEN=32"
 #endif
 
 #if CONFIG_ACTRUST_KV_MAX_VALUE_LEN > UINT32_MAX
@@ -186,8 +186,10 @@ static const kv_ns_map_t kv_ns_map[] = {
 };
 
 /** @brief Number of entries actually compiled into @c kv_ns_map. */
-#define KV_NS_MAP_SIZE    (sizeof(kv_ns_map) / sizeof(kv_ns_map[0]) - 1u)
-#define KV_RECORD_SIZE    ((uint32_t) sizeof(kv_record_t))
+#define KV_NS_MAP_SIZE (sizeof(kv_ns_map) / sizeof(kv_ns_map[0]) - 1u)
+/* Preserve the four-byte-aligned stride of the existing v2 layout. */
+#define KV_RECORD_SIZE                                                         \
+    ((KV_RECORD_HEAD_WIRE_SIZE + CONFIG_ACTRUST_KV_MAX_VALUE_LEN + 3u) & ~3u)
 #define KV_DATA_SIZE      (KV_RECORD_SIZE * (uint32_t) CONFIG_ACTRUST_KV_MAX_RECORDS)
 #define KV_JOURNAL_SIZE   KV_JOURNAL_WIRE_SIZE
 #define KV_JOURNAL_OFFSET (KV_DATA_OFFSET + KV_DATA_SIZE)
@@ -615,7 +617,7 @@ static actrust_err_t kv_write_superblock(actrust_storage_t st, size_t index,
 static actrust_err_t kv_read_journal(actrust_storage_t st, size_t index,
                                      kv_journal_t *journal)
 {
-    uint8_t       bytes[sizeof(*journal)];
+    uint8_t       bytes[KV_JOURNAL_WIRE_SIZE];
     actrust_err_t err = actrust_storage_read(st, kv_journal_offset(index),
                                              bytes, sizeof(bytes));
     if (ACTRUST_IS_ERR(err)) {

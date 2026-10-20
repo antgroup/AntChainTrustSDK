@@ -23,6 +23,19 @@ assert_rejected() {
 cp "$ROOT_DIR/config/linux_defconfig" "$TMP_DIR/valid.config"
 python3 "$VALIDATOR" "$TMP_DIR/valid.config" >/dev/null
 
+for key_len in 16 64; do
+    name="invalid-kv-key-$key_len"
+    sed "s/CONFIG_ACTRUST_KV_MAX_KEY_LEN=32/CONFIG_ACTRUST_KV_MAX_KEY_LEN=$key_len/" \
+        "$TMP_DIR/valid.config" >"$TMP_DIR/$name.config"
+    assert_rejected "$name" "$TMP_DIR/$name.config"
+    if ! grep -Fq "CONFIG_ACTRUST_KV_MAX_KEY_LEN: value $key_len outside range 32..32" \
+        "$TMP_DIR/$name.out"; then
+        printf 'unexpected KV key length rejection\n' >&2
+        sed -n '1,20p' "$TMP_DIR/$name.out" >&2
+        exit 1
+    fi
+done
+
 python3 - "$TMP_DIR/valid.config" "$TMP_DIR/unknown.config" <<'PY'
 from pathlib import Path
 import sys
