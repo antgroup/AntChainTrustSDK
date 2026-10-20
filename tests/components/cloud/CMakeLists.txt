@@ -62,7 +62,7 @@ endif()
 add_executable(cloud_unit_test "${CMAKE_CURRENT_LIST_DIR}/cloud_unit_test.c")
 target_link_libraries(
     cloud_unit_test
-    PRIVATE unity cloud crypto mqtt adapter
+    PRIVATE unity cloud crypto kv mqtt adapter
 )
 set(CLOUD_AWS_INCLUDE_DIR
     "${CMAKE_SOURCE_DIR}/source/components/cloud/source/provider/aws/include"
@@ -71,11 +71,18 @@ target_include_directories(cloud_unit_test PRIVATE "${CLOUD_AWS_INCLUDE_DIR}")
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_definitions(
         cloud_unit_test
-        PRIVATE ACTRUST_TEST_WRAP_CLOUD_TEARDOWN=1
+        PRIVATE
+            ACTRUST_TEST_WRAP_CLOUD_TEARDOWN=1
+            ACTRUST_TEST_WRAP_CLOUD_IDENTITY=1
     )
     target_link_options(
         cloud_unit_test
         PRIVATE
+            "-Wl,--wrap=actrust_kv_open"
+            "-Wl,--wrap=actrust_kv_get"
+            "-Wl,--wrap=actrust_kv_close"
+            "-Wl,--wrap=actrust_crypto_cert_read"
+            "-Wl,--wrap=actrust_crypto_key_open"
             "-Wl,--wrap=actrust_mqtt_deinit"
             "-Wl,--wrap=actrust_queue_destroy"
             "-Wl,--wrap=actrust_task_join"

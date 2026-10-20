@@ -869,9 +869,8 @@ static actrust_err_t actrust_cloud_aws_runtime_connect(actrust_cloud_t cloud)
     actrust_err_t ret = actrust_kv_open(CLOUD_AWS_KV_NAMESPACE,
                                         strlen(CLOUD_AWS_KV_NAMESPACE), &kv);
     if (ret != ACTRUST_OK) {
-        LOG_INFO("Runtime identity namespace not found, fallback to first "
-                 "connection.");
-        return CLOUD_ERR(ACTRUST_ERR_NOT_READY);
+        LOG_ERROR("Failed to open runtime identity namespace.");
+        return ret;
     }
 
     ret = actrust_kv_get(kv, CLOUD_AWS_THING_NAME_KV_KEY,
@@ -879,7 +878,26 @@ static actrust_err_t actrust_cloud_aws_runtime_connect(actrust_cloud_t cloud)
                          aws_ctx->thing_name, sizeof(aws_ctx->thing_name) - 1u,
                          &aws_ctx->thing_name_len);
     if (ret != ACTRUST_OK) {
-        (void) actrust_kv_close(kv);
+        if (ACTRUST_ERR_CODE(ret) != ACTRUST_ERR_NO_RESOURCE) {
+            (void) actrust_kv_close(kv);
+            return ret;
+        }
+
+        /* NO_RESOURCE can also mean the namespace metadata is unavailable. */
+        bool          exists = true;
+        actrust_err_t exists_ret =
+            actrust_kv_exists(kv, CLOUD_AWS_THING_NAME_KV_KEY,
+                              strlen(CLOUD_AWS_THING_NAME_KV_KEY), &exists);
+        actrust_err_t close_ret = actrust_kv_close(kv);
+        if (exists_ret != ACTRUST_OK) {
+            return exists_ret;
+        }
+        if (exists) {
+            return ret;
+        }
+        if (close_ret != ACTRUST_OK) {
+            return close_ret;
+        }
         LOG_INFO("Runtime thing name not found, fallback to first connection.");
         return CLOUD_ERR(ACTRUST_ERR_NOT_READY);
     }
@@ -893,6 +911,9 @@ static actrust_err_t actrust_cloud_aws_runtime_connect(actrust_cloud_t cloud)
 
     ret = actrust_cloud_aws_validate_thing_name(aws_ctx);
     if (ret != ACTRUST_OK) {
+        if (ret != CLOUD_ERR(ACTRUST_ERR_BAD_STATE)) {
+            return ret;
+        }
         LOG_WARN("Runtime thing name does not match device identity, clearing "
                  "cached identity.");
         actrust_cloud_aws_clear_runtime_identity(aws_ctx);
@@ -907,6 +928,9 @@ static actrust_err_t actrust_cloud_aws_runtime_connect(actrust_cloud_t cloud)
         (uint8_t *) aws_ctx->client_cert_pem, sizeof(aws_ctx->client_cert_pem),
         &aws_ctx->client_cert_len, &aws_ctx->client_key);
     if (ret != ACTRUST_OK) {
+        if (ACTRUST_ERR_CODE(ret) != ACTRUST_ERR_NO_RESOURCE) {
+            return ret;
+        }
         LOG_WARN("Runtime identity is incomplete, clearing cached identity.");
         actrust_cloud_aws_clear_runtime_identity(aws_ctx);
         return CLOUD_ERR(ACTRUST_ERR_NOT_READY);
