@@ -39,7 +39,7 @@ jobs:
       - name: Build API documentation
         run: |
           doxygen Doxyfile
-          test -f docs/v1.1.0/html/index.html
+          test -f "docs/v$(<VERSION)/html/index.html"
 
       - name: Record conditional test status
         run: |

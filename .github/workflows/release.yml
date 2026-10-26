@@ -47,10 +47,9 @@ jobs:
       - name: Validate release metadata and public API
         run: |
           test "${RELEASE_TAG}" = "v$(<VERSION)"
-          baseline_tag="$(git tag --sort=-version:refname --merged "${RELEASE_TAG}" \
-            | grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+$' \
-            | grep -v -F "${RELEASE_TAG}" | head -n 1)"
-          test -n "${baseline_tag}"
+          baseline_tag="$(python3 tools/release/check_release.py \
+            --print-baseline-tag --release-tag "${RELEASE_TAG}")"
+          echo "BASELINE_TAG=${baseline_tag}" >> "${GITHUB_ENV}"
           python3 tools/release/check_release.py \
             --release-tag "${RELEASE_TAG}" \
             --api \
@@ -58,11 +57,7 @@ jobs:
 
       - name: Build ABI baseline
         run: |
-          baseline_tag="$(git tag --sort=-version:refname --merged "${RELEASE_TAG}" \
-            | grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+$' \
-            | grep -v -F "${RELEASE_TAG}" | head -n 1)"
-          test -n "${baseline_tag}"
-          git worktree add --detach "${RUNNER_TEMP}/actrust-baseline" "${baseline_tag}"
+          git worktree add --detach "${RUNNER_TEMP}/actrust-baseline" "${BASELINE_TAG}"
           git -C "${RUNNER_TEMP}/actrust-baseline" submodule update --init --recursive
           (
             cd "${RUNNER_TEMP}/actrust-baseline"
