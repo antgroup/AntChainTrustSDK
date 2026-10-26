@@ -52,7 +52,7 @@ jobs:
       - name: Install release tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential cmake doxygen binutils tar
+          sudo apt-get install --yes build-essential cmake doxygen graphviz binutils tar openssl
 
       - name: Validate release metadata and public API
         run: |
@@ -113,19 +113,26 @@ jobs:
         env:
           ACTRUST_SIGN_COMMAND: ${{ secrets.ACTRUST_SIGN_COMMAND }}
           ACTRUST_VERIFY_COMMAND: ${{ secrets.ACTRUST_VERIFY_COMMAND }}
+          ACTRUST_SIGNING_PRIVATE_KEY: ${{ secrets.ACTRUST_SIGNING_PRIVATE_KEY }}
+          ACTRUST_SIGNING_PASSPHRASE: ${{ secrets.ACTRUST_SIGNING_PASSPHRASE }}
         run: |
           bundle="${BUILD_DIR}/AntChainTrustSDK-$(<VERSION)-linux_x86.tar.gz"
-          "${GITHUB_WORKSPACE}/tools/release/sign_artifact.sh" "${bundle}" "${bundle}.sig"
+          public_key="${GITHUB_WORKSPACE}/tools/release/actrust-release-p256-public.pem"
+          "${GITHUB_WORKSPACE}/tools/release/sign_release.sh" \
+            "${bundle}" "${bundle}.sig" "${public_key}"
+          cp "${public_key}" "${BUILD_DIR}/actrust-release-p256-public.pem"
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           generate_release_notes: false
+          fail_on_unmatched_files: true
           body_path: release-source/docs/releases/${{ env.RELEASE_TAG }}.md
           files: |
             ${{ env.BUILD_DIR }}/AntChainTrustSDK-*.tar.gz
             ${{ env.BUILD_DIR }}/AntChainTrustSDK-*.tar.gz.sha256
             ${{ env.BUILD_DIR }}/AntChainTrustSDK-*.tar.gz.sig
+            ${{ env.BUILD_DIR }}/actrust-release-p256-public.pem
             ${{ env.BUILD_DIR }}/bundle-metadata/THIRD_PARTY.json
             ${{ env.BUILD_DIR }}/bundle-metadata/sbom.spdx.json
