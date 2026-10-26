@@ -267,14 +267,14 @@ HTML reference locally with Doxygen from the public headers, component
 interfaces, selected internal headers, and examples:
 
 ```bash
-doxygen Doxyfile        # output written to docs/v1.1.0/html/ (git-ignored)
+doxygen Doxyfile        # output written to docs/v1.1.1/html/ (git-ignored)
 ```
 
-Open `docs/v1.1.0/html/index.html` after generation.
+Open `docs/v1.1.1/html/index.html` after generation.
 
 Release changes and validation limits are recorded in the
 [changelog](https://github.com/antgroup/AntChainTrustSDK/blob/main/CHANGELOG.md),
-[v1.1.0 release notes](https://github.com/antgroup/AntChainTrustSDK/blob/main/docs/releases/v1.1.0.md), and
+[v1.1.1 release notes](https://github.com/antgroup/AntChainTrustSDK/blob/main/docs/releases/v1.1.1.md), and
 [GitHub releases](https://github.com/antgroup/AntChainTrustSDK/releases).
 
 ---
