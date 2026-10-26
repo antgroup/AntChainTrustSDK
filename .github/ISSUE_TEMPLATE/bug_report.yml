@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Bug report
+description: Report a reproducible SDK problem.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security vulnerabilities, follow [SECURITY.md](https://github.com/antgroup/AntChainTrustSDK/blob/main/SECURITY.md).
+        Remove credentials, private keys, and device certificates from examples and logs.
+  - type: input
+    id: sdk-version
+    attributes:
+      label: SDK version or commit
+      placeholder: v1.1.0 or a full commit SHA
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Target platform
+      placeholder: linux_x86, linux_arm, android, or simcom_a7606e; OS/device details
+    validations:
+      required: true
+  - type: textarea
+    id: toolchain
+    attributes:
+      label: Toolchain and configuration
+      description: >-
+        Include compiler/NDK and CMake versions, defconfig, and relevant
+        configuration changes.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        Include exact build/run commands, a minimal example, and relevant error
+        output.
+      placeholder: |
+        1.
+        2.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true

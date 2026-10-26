@@ -26,5 +26,12 @@ target_include_directories(
     PRIVATE "${CMAKE_SOURCE_DIR}/tests/common"
 )
 target_link_libraries(kv_unit_test PRIVATE unity kv adapter)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_definitions(
+        kv_unit_test
+        PRIVATE ACTRUST_TEST_WRAP_KV_STORAGE=1
+    )
+    target_link_options(kv_unit_test PRIVATE "-Wl,--wrap=actrust_storage_read")
+endif()
 actrust_add_test(NAME kv_unit_test COMMAND kv_unit_test)
 set_tests_properties(kv_unit_test PROPERTIES LABELS "actrust;component;unit")

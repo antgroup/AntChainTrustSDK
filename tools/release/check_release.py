@@ -43,6 +43,26 @@ def read_version(root: Path) -> str:
     return version
 
 
+def find_baseline_tag(
+    root: Path, release_tag: str, reference: Optional[str] = None,
+) -> str:
+    if not release_tag.startswith("v") or not SEMVER.fullmatch(release_tag[1:]):
+        fail(f"release tag is not a stable version tag: {release_tag!r}")
+    release_version = tuple(int(part) for part in release_tag[1:].split("."))
+    reference = reference or f"refs/tags/{release_tag}"
+    tags = git(root, "tag", "--merged", reference).splitlines()
+    candidates = []
+    for tag in tags:
+        if not tag.startswith("v") or not SEMVER.fullmatch(tag[1:]):
+            continue
+        version = tuple(int(part) for part in tag[1:].split("."))
+        if version < release_version:
+            candidates.append((version, tag))
+    if not candidates:
+        fail(f"no earlier stable release tag is an ancestor of {reference}")
+    return max(candidates)[1]
+
+
 def is_public_header(path: str) -> bool:
     if path.startswith("source/core/include/"):
         return False
@@ -88,7 +108,18 @@ def api_lines(text: str) -> list[str]:
         )
         if not starts_decl:
             continue
-        while not record[-1].endswith(";") and index < len(source_lines):
+        # A member's semicolon does not terminate its enclosing typedef.
+        # Ignore quoted braces (for example character-valued enum members).
+        depth = 0
+        while True:
+            tokens = re.sub(
+                r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', "", record[-1]
+            )
+            depth += tokens.count("{") - tokens.count("}")
+            if depth == 0 and record[-1].endswith(";"):
+                break
+            if index == len(source_lines):
+                break
             record.append(source_lines[index].strip())
             index += 1
         normalized = re.sub(r"\s+", " ", " ".join(record))
@@ -216,9 +247,7 @@ def check_abi_headers(baseline: Path, current: Path) -> None:
         new_index = 0
         for line in old_lines:
             while new_index < len(new_lines) and new_lines[new_index] != line:
-                if new_index + 1 < len(new_lines) and is_compatible_count_change(
-                    line, new_lines[new_index]
-                ):
+                if is_compatible_count_change(line, new_lines[new_index]):
                     break
                 new_index += 1
             if new_index == len(new_lines):
@@ -286,6 +315,15 @@ def main() -> int:
     )
     parser.add_argument("--version")
     parser.add_argument("--release-tag")
+    parser.add_argument(
+        "--print-baseline-tag",
+        action="store_true",
+        help="print the latest earlier stable ancestor of --release-tag",
+    )
+    parser.add_argument(
+        "--baseline-ref",
+        help="override ancestry for --print-baseline-tag (for example HEAD)",
+    )
     parser.add_argument("--baseline-tag")
     parser.add_argument("--api", action="store_true")
     parser.add_argument("--abi-baseline", type=Path)
@@ -294,6 +332,11 @@ def main() -> int:
     parser.add_argument("--abi-header-current", type=Path)
     args = parser.parse_args()
     root = args.root.resolve()
+    if args.print_baseline_tag:
+        if not args.release_tag:
+            fail("--release-tag is required with --print-baseline-tag")
+        print(find_baseline_tag(root, args.release_tag, args.baseline_ref))
+        return 0
     version = args.version or read_version(root)
     check_release(root, version, args.release_tag)
     if args.api:

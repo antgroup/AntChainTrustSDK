@@ -13,7 +13,11 @@ config ACTRUST_KV_NAMESPACE_MAX_LEN
 
 config ACTRUST_KV_MAX_KEY_LEN
     int "Max key length"
+    range 32 32
     default 32
+    help
+        The v2 storage format reserves exactly 32 bytes for each key.
+        Other values require a different storage layout.
 
 config ACTRUST_KV_MAX_VALUE_LEN
     int "Max value length"

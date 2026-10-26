@@ -579,8 +579,19 @@ fail_ntp:
     (void) actrust_ntp_deinit(ctx->ntp);
     ctx->ntp = NULL;
 fail_crypto:
+    if (ctx->sign_key != NULL) {
+        actrust_err_t close_err =
+            actrust_crypto_key_close(ctx->crypto, &ctx->sign_key);
+        if (ACTRUST_IS_ERR(close_err)) {
+            LOG_WARN("signing key close during init rollback failed: "
+                     "0x%08" PRIx32,
+                     close_err);
+            /* Preserve crypto so deinit can retry closing the key. */
+            goto fail;
+        }
+    }
     (void) actrust_crypto_deinit(&ctx->crypto);
-    ctx->crypto = NULL;
+fail:
     core_set_state(ACTRUST_CORE_INIT_FAILED);
     return err;
 }

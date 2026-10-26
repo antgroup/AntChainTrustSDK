@@ -17,7 +17,8 @@ permissions:
 jobs:
   format-and-doxygen:
     name: Format and Doxygen
-    runs-on: ubuntu-latest
+    # Keep clang-format 18 behavior stable across runner-image upgrades.
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -28,7 +29,7 @@ jobs:
       - name: Install quality tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes clang-format doxygen python3-venv shfmt
+          sudo apt-get install --yes clang-format doxygen graphviz python3-venv shfmt
           python3 -m venv "${RUNNER_TEMP}/quality-tools"
           "${RUNNER_TEMP}/quality-tools/bin/pip" install gersemi
           echo "${RUNNER_TEMP}/quality-tools/bin" >> "${GITHUB_PATH}"
@@ -39,7 +40,7 @@ jobs:
       - name: Build API documentation
         run: |
           doxygen Doxyfile
-          test -f docs/v1.1.0/html/index.html
+          test -f "docs/v$(<VERSION)/html/index.html"
 
       - name: Record conditional test status
         run: |

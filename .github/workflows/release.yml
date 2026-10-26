@@ -21,16 +21,26 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       RELEASE_TAG: ${{ inputs.release_tag }}
+    defaults:
+      run:
+        working-directory: release-source
     steps:
-      - name: Configure build environment
-        run: echo "BUILD_DIR=${RUNNER_TEMP}/actrust-release" >> "${GITHUB_ENV}"
+      # Keep the workflow and its tools together when validating older tags.
+      - name: Check out release tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
 
       - name: Check out release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          path: release-source
           fetch-depth: 0
           submodules: recursive
+
+      - name: Configure build environment
+        run: echo "BUILD_DIR=${RUNNER_TEMP}/actrust-release" >> "${GITHUB_ENV}"
 
       - name: Verify protected main ancestry
         run: |
@@ -42,34 +52,32 @@ jobs:
       - name: Install release tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential cmake doxygen binutils tar
+          sudo apt-get install --yes build-essential cmake doxygen graphviz binutils tar openssl
 
       - name: Validate release metadata and public API
         run: |
           test "${RELEASE_TAG}" = "v$(<VERSION)"
-          baseline_tag="$(git tag --sort=-version:refname --merged "${RELEASE_TAG}" \
-            | grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+$' \
-            | grep -v -F "${RELEASE_TAG}" | head -n 1)"
-          test -n "${baseline_tag}"
-          python3 tools/release/check_release.py \
+          baseline_tag="$(python3 "${GITHUB_WORKSPACE}/tools/release/check_release.py" \
+            --root "${GITHUB_WORKSPACE}/release-source" \
+            --print-baseline-tag --release-tag "${RELEASE_TAG}")"
+          echo "BASELINE_TAG=${baseline_tag}" >> "${GITHUB_ENV}"
+          python3 "${GITHUB_WORKSPACE}/tools/release/check_release.py" \
+            --root "${GITHUB_WORKSPACE}/release-source" \
             --release-tag "${RELEASE_TAG}" \
             --api \
             --baseline-tag "${baseline_tag}"
 
       - name: Build ABI baseline
         run: |
-          baseline_tag="$(git tag --sort=-version:refname --merged "${RELEASE_TAG}" \
-            | grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+$' \
-            | grep -v -F "${RELEASE_TAG}" | head -n 1)"
-          test -n "${baseline_tag}"
-          git worktree add --detach "${RUNNER_TEMP}/actrust-baseline" "${baseline_tag}"
+          git worktree add --detach "${RUNNER_TEMP}/actrust-baseline" "${BASELINE_TAG}"
           git -C "${RUNNER_TEMP}/actrust-baseline" submodule update --init --recursive
           (
             cd "${RUNNER_TEMP}/actrust-baseline"
-            BUILD_DIR="${RUNNER_TEMP}/actrust-baseline-build" \
+            # Older tags generate configuration only under source/build.
+            BUILD_DIR="${PWD}/build" \
               ./build.sh linux_x86 --clean-build
           )
-          echo "ABI_BASELINE_DIR=${RUNNER_TEMP}/actrust-baseline-build" >> "${GITHUB_ENV}"
+          echo "ABI_BASELINE_DIR=${RUNNER_TEMP}/actrust-baseline/build" >> "${GITHUB_ENV}"
 
       - name: Build and test Linux x86 release bundle
         run: ./build.sh linux_x86 --clean-build --build-tests
@@ -88,12 +96,15 @@ jobs:
       - name: Verify bundle metadata and checksum
         run: |
           cmake --build "${BUILD_DIR}" --target actrust_sdk_bundle
-          python3 tools/release/check_release.py --release-tag "${RELEASE_TAG}"
-          python3 tools/release/check_release.py \
+          python3 "${GITHUB_WORKSPACE}/tools/release/check_release.py" \
+            --root "${GITHUB_WORKSPACE}/release-source" \
+            --release-tag "${RELEASE_TAG}"
+          python3 "${GITHUB_WORKSPACE}/tools/release/check_release.py" \
+            --root "${GITHUB_WORKSPACE}/release-source" \
             --abi-baseline "${ABI_BASELINE_DIR}" \
             --abi-current "${BUILD_DIR}" \
             --abi-header-baseline "${RUNNER_TEMP}/actrust-baseline" \
-            --abi-header-current "${GITHUB_WORKSPACE}"
+            --abi-header-current "${GITHUB_WORKSPACE}/release-source"
           test -s "${BUILD_DIR}/AntChainTrustSDK-$(<VERSION)-linux_x86.tar.gz"
           test -s "${BUILD_DIR}/AntChainTrustSDK-$(<VERSION)-linux_x86.tar.gz.sha256"
           test -s "${BUILD_DIR}/bundle-metadata/sbom.spdx.json"
@@ -102,19 +113,26 @@ jobs:
         env:
           ACTRUST_SIGN_COMMAND: ${{ secrets.ACTRUST_SIGN_COMMAND }}
           ACTRUST_VERIFY_COMMAND: ${{ secrets.ACTRUST_VERIFY_COMMAND }}
+          ACTRUST_SIGNING_PRIVATE_KEY: ${{ secrets.ACTRUST_SIGNING_PRIVATE_KEY }}
+          ACTRUST_SIGNING_PASSPHRASE: ${{ secrets.ACTRUST_SIGNING_PASSPHRASE }}
         run: |
           bundle="${BUILD_DIR}/AntChainTrustSDK-$(<VERSION)-linux_x86.tar.gz"
-          tools/release/sign_artifact.sh "${bundle}" "${bundle}.sig"
+          public_key="${GITHUB_WORKSPACE}/tools/release/actrust-release-p256-public.pem"
+          "${GITHUB_WORKSPACE}/tools/release/sign_release.sh" \
+            "${bundle}" "${bundle}.sig" "${public_key}"
+          cp "${public_key}" "${BUILD_DIR}/actrust-release-p256-public.pem"
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           generate_release_notes: false
-          body_path: docs/releases/${{ env.RELEASE_TAG }}.md
+          fail_on_unmatched_files: true
+          body_path: release-source/docs/releases/${{ env.RELEASE_TAG }}.md
           files: |
             ${{ env.BUILD_DIR }}/AntChainTrustSDK-*.tar.gz
             ${{ env.BUILD_DIR }}/AntChainTrustSDK-*.tar.gz.sha256
             ${{ env.BUILD_DIR }}/AntChainTrustSDK-*.tar.gz.sig
+            ${{ env.BUILD_DIR }}/actrust-release-p256-public.pem
             ${{ env.BUILD_DIR }}/bundle-metadata/THIRD_PARTY.json
             ${{ env.BUILD_DIR }}/bundle-metadata/sbom.spdx.json

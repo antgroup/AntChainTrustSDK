@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Antchain (SHANGHAI) Digital Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Feature request
+description: Propose an SDK capability for a concrete use case.
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: >-
+        Describe the problem, target platform, and any current workaround.
+    validations:
+      required: true
+  - type: textarea
+    id: capability
+    attributes:
+      label: Proposed capability
+      description: >-
+        Describe the desired behavior and how it would help your application.
+    validations:
+      required: true

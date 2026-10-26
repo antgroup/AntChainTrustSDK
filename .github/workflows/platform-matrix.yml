@@ -67,11 +67,12 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android NDK
         run: |
-          yes | sdkmanager --licenses
-          yes | sdkmanager "platforms;android-23" "ndk;${ANDROID_NDK_VERSION}"
+          sdkmanager "platforms;android-23" "ndk;${ANDROID_NDK_VERSION}"
           echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" >> "${GITHUB_ENV}"
           ndk_bin="${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           "${ndk_bin}/clang" --version
