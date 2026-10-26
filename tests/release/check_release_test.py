@@ -6,13 +6,17 @@
 from contextlib import redirect_stderr, redirect_stdout
 from importlib.util import module_from_spec, spec_from_file_location
 from io import StringIO
+import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
+import textwrap
 import unittest
 
 
 CHECKER = Path(__file__).resolve().parents[2] / "tools/release/check_release.py"
+WORKFLOW = CHECKER.parents[2] / ".github/workflows/release.yml"
 SPEC = spec_from_file_location("check_release", CHECKER)
 release = module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
@@ -273,6 +277,186 @@ typedef union {
             "cannot read release metadata:", release.check_release,
             self.new, "2.0.0", None,
         )
+
+
+class HistoricalReleaseWorkflowChecks(unittest.TestCase):
+    """Run workflow gates with newer tooling and a detached historical tag."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.workspace = self.root / "workspace"
+        initialize(self.workspace)
+        metadata(self.workspace, "1.0.0")
+        checker = self.workspace / "tools/release/check_release.py"
+        checker.parent.mkdir(parents=True)
+        checker.write_text(
+            "import argparse\n"
+            "parser = argparse.ArgumentParser()\n"
+            "parser.add_argument('--release-tag')\n"
+            "parser.parse_args()\n",
+            encoding="utf-8",
+        )
+        build_script = self.workspace / "build.sh"
+        build_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "test \"${1}\" = linux_x86\n"
+            "test \"${2}\" = --clean-build\n"
+            "mkdir -p build/config\n"
+            "echo configuration > build/config/actrust_config.cmake\n"
+            "test -s \"${BUILD_DIR}/config/actrust_config.cmake\"\n"
+            "echo baseline > \"${BUILD_DIR}/baseline-built\"\n",
+            encoding="utf-8",
+        )
+        build_script.chmod(0o755)
+        git(self.workspace, "add", ".")
+        git(self.workspace, "commit", "--quiet", "-m", "Old release tooling")
+        git(self.workspace, "tag", "v1.0.0")
+        metadata(self.workspace, "1.1.0")
+        git(self.workspace, "add", ".")
+        git(self.workspace, "commit", "--quiet", "-m", "Historical release")
+        git(self.workspace, "tag", "v1.1.0")
+        metadata(self.workspace, "9.0.0")
+        checker.write_text(CHECKER.read_text(encoding="utf-8"),
+                           encoding="utf-8")
+        git(self.workspace, "add", ".")
+        git(self.workspace, "commit", "--quiet", "-m", "Current release tools")
+        self.source = self.workspace / "release-source"
+        git(self.workspace, "worktree", "add", "--detach", str(self.source),
+            "v1.1.0")
+        self.runner_temp = self.root / "runner-temp"
+        self.runner_temp.mkdir()
+        self.github_env = self.root / "github-env"
+        self.env = dict(os.environ, GITHUB_WORKSPACE=str(self.workspace),
+                        RUNNER_TEMP=str(self.runner_temp),
+                        GITHUB_ENV=str(self.github_env), RELEASE_TAG="v1.1.0")
+
+    def run_step(self, name):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        step = re.search(
+            rf"(?ms)^      - name: {re.escape(name)}\n"
+            r"(.*?)(?=^      - name: |\Z)", workflow,
+        )
+        self.assertIsNotNone(step, f"workflow step missing: {name}")
+        script = re.search(r"(?ms)^        run: \|\n(.*)", step.group(1))
+        self.assertIsNotNone(script, f"workflow run block missing: {name}")
+        directory = re.search(
+            r"(?m)^    defaults:\n      run:\n"
+            r"        working-directory: (.+)$", workflow,
+        )
+        cwd = self.workspace
+        if directory:
+            cwd /= directory.group(1)
+        return subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+             textwrap.dedent(script.group(1))],
+            cwd=cwd, env=self.env, capture_output=True, text=True, check=False,
+        )
+
+    def test_historical_tag_uses_current_checker_and_its_own_version(self):
+        legacy = subprocess.run(
+            ["python3", "tools/release/check_release.py", "--release-tag",
+             "v1.1.0", "--print-baseline-tag"], cwd=self.source,
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(legacy.returncode, 2)
+        self.assertIn("unrecognized arguments: --print-baseline-tag",
+                      legacy.stderr)
+        result = self.run_step("Validate release metadata and public API")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Release metadata: PASS (1.1.0)", result.stdout)
+        self.assertIn("API diff: PASS", result.stdout)
+        self.assertEqual(self.github_env.read_text(), "BASELINE_TAG=v1.0.0\n")
+
+    def test_historical_metadata_failure_stops_workflow(self):
+        (self.source / "Doxyfile").write_text(
+            "PROJECT_NUMBER = 9.0.0\nOUTPUT_DIRECTORY = docs/v9.0.0\n",
+            encoding="utf-8",
+        )
+        result = self.run_step("Validate release metadata and public API")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Doxyfile PROJECT_NUMBER does not match VERSION",
+                      result.stderr)
+
+    def test_historical_public_api_failure_stops_workflow(self):
+        (self.source / "include/actrust.h").write_text(
+            HEADER.replace("int last", "long last"), encoding="utf-8",
+        )
+        result = self.run_step("Validate release metadata and public API")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("incompatible public API changes:", result.stderr)
+
+    def test_baseline_build_uses_historical_configuration_directory(self):
+        release_build = self.runner_temp / "actrust-release"
+        release_build.mkdir()
+        self.env.update(BASELINE_TAG="v1.0.0", BUILD_DIR=str(release_build))
+        result = self.run_step("Build ABI baseline")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        baseline_build = self.runner_temp / "actrust-baseline/build"
+        self.assertEqual(self.github_env.read_text(),
+                         f"ABI_BASELINE_DIR={baseline_build}\n")
+        self.assertEqual((baseline_build / "baseline-built").read_text(),
+                         "baseline\n")
+        self.assertTrue(
+            (baseline_build / "config/actrust_config.cmake").is_file(),
+        )
+        self.assertEqual(list(release_build.iterdir()), [])
+
+    def test_bundle_gate_checks_historical_abi_headers_and_archives(self):
+        baseline = self.runner_temp / "actrust-baseline"
+        git(self.workspace, "worktree", "add", "--detach", str(baseline),
+            "v1.0.0")
+        build = self.runner_temp / "actrust-release"
+        baseline_build = baseline / "build"
+        fixture = self.root / "bundle-fixture"
+        fixture.mkdir()
+        (fixture / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.16)\n"
+            "project(BundleFixture NONE)\n"
+            "add_custom_target(actrust_sdk_bundle)\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["cmake", "-S", str(fixture), "-B", str(build)],
+                       check=True, capture_output=True, text=True)
+        for directory in (baseline_build, build):
+            directory.mkdir(exist_ok=True)
+            obj = directory / "probe.o"
+            subprocess.run(
+                ["cc", "-x", "c", "-c", "-o", str(obj), "-"],
+                input="int actrust_probe(int value) { return value; }\n",
+                check=True, capture_output=True, text=True,
+            )
+            subprocess.run(
+                ["ar", "rcs", str(directory / "libactrust.a"), str(obj)],
+                check=True, capture_output=True, text=True,
+            )
+        for path in ("AntChainTrustSDK-1.1.0-linux_x86.tar.gz",
+                     "AntChainTrustSDK-1.1.0-linux_x86.tar.gz.sha256",
+                     "bundle-metadata/sbom.spdx.json"):
+            output = build / path
+            output.parent.mkdir(exist_ok=True)
+            output.write_text("fixture\n", encoding="utf-8")
+        self.env.update(BUILD_DIR=str(build),
+                        ABI_BASELINE_DIR=str(baseline_build))
+        result = self.run_step("Verify bundle metadata and checksum")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Release metadata: PASS (1.1.0)", result.stdout)
+        self.assertIn("ABI diff: PASS (1 baseline symbols, 1 current symbols)",
+                      result.stdout)
+        (self.source / "include/actrust.h").write_text(
+            HEADER.replace("int last", "long last"), encoding="utf-8",
+        )
+        result = self.run_step("Verify bundle metadata and checksum")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("public ABI declarations changed:", result.stderr)
+        (self.source / "include/actrust.h").write_text(HEADER, encoding="utf-8")
+        subprocess.run(["ar", "d", str(build / "libactrust.a"), "probe.o"],
+                       check=True, capture_output=True, text=True)
+        result = self.run_step("Verify bundle metadata and checksum")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ABI symbols removed: actrust_probe", result.stderr)
 
 
 if __name__ == "__main__":
