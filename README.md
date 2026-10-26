@@ -1,6 +1,15 @@
 # AntChainTrustSDK
 
+[![Linux Quality](https://github.com/antgroup/AntChainTrustSDK/actions/workflows/linux-quality.yml/badge.svg)](https://github.com/antgroup/AntChainTrustSDK/actions/workflows/linux-quality.yml)
+[![Platform Matrix](https://github.com/antgroup/AntChainTrustSDK/actions/workflows/platform-matrix.yml/badge.svg)](https://github.com/antgroup/AntChainTrustSDK/actions/workflows/platform-matrix.yml)
+[![Release](https://img.shields.io/github/v/release/antgroup/AntChainTrustSDK)](https://github.com/antgroup/AntChainTrustSDK/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE) [![Standard: C99](https://img.shields.io/badge/C-99-A8B9CC?logo=c&logoColor=white)](https://www.iso.org/standard/29237.html) [![Target](https://img.shields.io/badge/target-Linux%20%7C%20Android%20%7C%20SIMCom-1f6feb)](README.md#quick-start-linux-x86_64)
+
+[Quick start](#quick-start-linux-x86_64) ·
+[Examples](examples/hello_actrust.c) ·
+[API documentation](#api-documentation) ·
+[Release history](https://github.com/antgroup/AntChainTrustSDK/releases) ·
+[Changelog](https://github.com/antgroup/AntChainTrustSDK/blob/main/CHANGELOG.md)
 
 A modular IoT framework in **C99** providing platform abstraction, component
 libraries, and third-party integrations for embedded systems.
@@ -75,6 +84,8 @@ AntChainTrustSDK/
 ```
 
 ---
+
+<a id="quick-start-linux-x86_64"></a>
 
 ## Quick Start (Linux x86_64)
 
@@ -246,14 +257,25 @@ the normal library/test build.
 
 ---
 
+<a id="api-documentation"></a>
+
 ## API Documentation
 
-API docs are generated with Doxygen from the public headers, component
+Start with the documented [client API](include/actrust.h) and
+[error codes](include/actrust_errno.h) in the repository. Generate a browsable
+HTML reference locally with Doxygen from the public headers, component
 interfaces, selected internal headers, and examples:
 
 ```bash
 doxygen Doxyfile        # output written to docs/v1.1.0/html/ (git-ignored)
 ```
+
+Open `docs/v1.1.0/html/index.html` after generation.
+
+Release changes and validation limits are recorded in the
+[changelog](https://github.com/antgroup/AntChainTrustSDK/blob/main/CHANGELOG.md),
+[v1.1.0 release notes](https://github.com/antgroup/AntChainTrustSDK/blob/main/docs/releases/v1.1.0.md), and
+[GitHub releases](https://github.com/antgroup/AntChainTrustSDK/releases).
 
 ---
 
