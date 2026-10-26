@@ -17,7 +17,8 @@ permissions:
 jobs:
   format-and-doxygen:
     name: Format and Doxygen
-    runs-on: ubuntu-latest
+    # Keep clang-format 18 behavior stable across runner-image upgrades.
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
